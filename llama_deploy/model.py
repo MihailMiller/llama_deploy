@@ -26,6 +26,10 @@ _METADATA_FALLBACK_REPOS = {
     # Some mirrors expose LFS metadata even when the upstream repo does not.
     "Qwen/Qwen3-8B-GGUF": "Aldaris/Qwen3-8B-Q4_K_M-GGUF",
 }
+_UNTRUSTED_API_SHA_REPOS = {
+    # Upstream API metadata can diverge from bytes served by pinned /resolve URLs.
+    "Qwen/Qwen3-8B-GGUF",
+}
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -292,6 +296,12 @@ def download_hf_file(
                 f"Accepting pinned file."
             )
             expected_sha256 = probe_sha
+        elif repo in _UNTRUSTED_API_SHA_REPOS and not probe_sha:
+            tqdm.write(
+                f"[WARN] SHA mismatch against HF API metadata for {repo}, but resolve headers "
+                f"do not expose a checksum. Accepting downloaded file with local sha256={got_sha}."
+            )
+            expected_sha256 = got_sha
         else:
             die(
                 f"SHA256 mismatch for {dst.name}\n"
@@ -349,6 +359,12 @@ def resolve_model(spec: ModelSpec, dst_dir: Path, hf_token: Optional[str]) -> Mo
                     f"({probed_sha[:12]}...); using resolve header."
                 )
             sha256 = probed_sha
+        elif repo in _UNTRUSTED_API_SHA_REPOS and sha256 is not None:
+            tqdm.write(
+                f"[WARN] HF API sha256 for {repo} is known inconsistent and resolve headers "
+                f"did not expose a checksum. Falling back to best-effort verification."
+            )
+            sha256 = None
         return filename, size, sha256, revision
 
     resolved_repo = spec.hf_repo
