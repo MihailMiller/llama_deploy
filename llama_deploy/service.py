@@ -48,7 +48,10 @@ def write_models_ini(
     """
     assert llm.resolved_filename, "LLM ModelSpec must be resolved before writing INI"
     assert emb.resolved_filename, "Embedding ModelSpec must be resolved before writing INI"
-    llm_startup = "true"
+    # Keep implicit/local presets off by default so startup count is fully
+    # controlled by explicit model sections below (important for models_max=1).
+    global_startup = "false"
+    llm_startup = "true" if models_max >= 1 else "false"
     emb_startup = "true" if models_max >= 2 else "false"
 
     content = f"""version = 1
@@ -56,6 +59,7 @@ def write_models_ini(
 [*]
 parallel = {parallel}
 jinja = false
+load-on-startup = {global_startup}
 c = {llm.ctx_len}
 
 [{llm.effective_alias}]
