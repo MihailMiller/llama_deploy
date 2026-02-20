@@ -3,7 +3,8 @@ HuggingFace model resolution and download.
 
 Public entry point: resolve_model(spec, dst_dir, hf_token) -> ModelSpec
 Returns a new ModelSpec with resolved_filename / resolved_sha256 / resolved_size
-populated, and the GGUF file verified on disk.
+populated, and the GGUF file present on disk (strictly verified when upstream
+metadata includes sha256/size).
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 import shutil
 import urllib.error
 import urllib.request
@@ -24,6 +26,32 @@ _METADATA_FALLBACK_REPOS = {
     # Some mirrors expose LFS metadata even when the upstream repo does not.
     "Qwen/Qwen3-8B-GGUF": "Aldaris/Qwen3-8B-Q4_K_M-GGUF",
 }
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _normalize_sha256(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    v = raw.strip()
+    if v.startswith("W/"):
+        v = v[2:].strip()
+    v = v.strip('"').strip("'")
+    if ":" in v:
+        # Handle "sha256:<hex>" style values.
+        _, tail = v.split(":", 1)
+        v = tail.strip()
+    if _SHA256_RE.fullmatch(v):
+        return v.lower()
+    return None
+
+
+def _int_or_none(raw: Optional[str]) -> Optional[int]:
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +74,41 @@ def hf_model_metadata(repo: str, hf_token: Optional[str]) -> Dict[str, Any]:
         die(f"Failed to query HuggingFace API for {repo}: {e}")
 
 
-def pick_hf_file(meta: Dict[str, Any], spec: ModelSpec) -> Tuple[str, int, str]:
+def probe_hf_resolve_metadata(
+    repo: str,
+    filename: str,
+    hf_token: Optional[str],
+) -> Tuple[Optional[int], Optional[str]]:
     """
-    Return (filename, size_bytes, sha256) by matching spec.candidate_patterns
+    Best-effort metadata probe via /resolve headers.
+
+    Some public HF repos omit lfs.sha256/size in /api/models payload. We try to
+    recover size and checksum from response headers (if exposed).
+    """
+    url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
+    req = urllib.request.Request(url, method="HEAD")
+    req.add_header("User-Agent", "llamacpp-paranoid-deploy/1.0")
+    if hf_token:
+        req.add_header("Authorization", f"Bearer {hf_token}")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            headers = resp.headers
+            size = (
+                _int_or_none(headers.get("x-linked-size"))
+                or _int_or_none(headers.get("content-length"))
+            )
+            sha = (
+                _normalize_sha256(headers.get("x-linked-etag"))
+                or _normalize_sha256(headers.get("etag"))
+            )
+            return size, sha
+    except Exception:
+        return None, None
+
+
+def pick_hf_file(meta: Dict[str, Any], spec: ModelSpec) -> Tuple[str, Optional[int], Optional[str]]:
+    """
+    Return (filename, size_bytes?, sha256?) by matching spec.candidate_patterns
     against the files listed in the HF repo metadata.
 
     candidate_patterns are matched as substrings of the filename. The first
@@ -77,12 +137,9 @@ def pick_hf_file(meta: Dict[str, Any], spec: ModelSpec) -> Tuple[str, int, str]:
         lfs = s.get("lfs") or {}
         sha = lfs.get("sha256") or lfs.get("oid")
         size = lfs.get("size") or s.get("size")
-        if not sha or not size:
-            raise ValueError(
-                f"HF metadata for '{chosen}' is missing sha256/size. "
-                f"The repo may not expose LFS metadata publicly."
-            )
-        return chosen, int(size), str(sha)
+        resolved_size = int(size) if size else None
+        resolved_sha = _normalize_sha256(str(sha) if sha else None)
+        return chosen, resolved_size, resolved_sha
 
     raise ValueError(
         f"None of the candidate patterns matched any file in repo '{spec.hf_repo}'. "
@@ -121,34 +178,51 @@ def download_hf_file(
     repo: str,
     filename: str,
     dst: Path,
-    expected_sha256: str,
-    expected_size: int,
+    expected_sha256: Optional[str],
+    expected_size: Optional[int],
     hf_token: Optional[str],
-) -> None:
+) -> Tuple[str, int]:
     """
-    Download a file from HuggingFace with tqdm progress, verify size and sha256.
+    Download a file from HuggingFace with tqdm progress.
+    If expected metadata is present, verify size and sha256 strictly.
     Resumes a partial .part file if one exists (HTTP Range request).
     """
     from tqdm import tqdm
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    # If file already exists and sha matches, keep it
+    # If file already exists and it can be validated, keep it.
     if dst.exists():
         got = sha256_file(dst)
-        if got.lower() == expected_sha256.lower():
-            tqdm.write(f"[OK] {dst.name} exists and sha256 matches.")
-            return
-        ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        bad = dst.with_suffix(dst.suffix + f".BADSHA.{ts}")
-        shutil.move(dst, bad)
-        tqdm.write(f"[WARN] Existing {dst.name} sha mismatch; moved aside to {bad.name}")
+        got_size = dst.stat().st_size
+        if expected_sha256:
+            if got.lower() == expected_sha256.lower():
+                tqdm.write(f"[OK] {dst.name} exists and sha256 matches.")
+                return got, got_size
+        elif expected_size is not None and got_size == expected_size:
+            tqdm.write(f"[OK] {dst.name} exists and size matches.")
+            tqdm.write(f"[WARN] Upstream sha256 unavailable; using local sha256={got}.")
+            return got, got_size
+        elif expected_size is None:
+            tqdm.write(f"[WARN] Upstream sha256/size unavailable; reusing existing {dst.name}.")
+            tqdm.write(f"[WARN] Local sha256 for reference: {got}")
+            return got, got_size
 
-    ensure_disk_space(dst.parent, expected_size)
+        ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        bad = dst.with_suffix(dst.suffix + f".BADMETA.{ts}")
+        shutil.move(dst, bad)
+        tqdm.write(f"[WARN] Existing {dst.name} could not be validated; moved aside to {bad.name}")
+
+    if expected_size is not None:
+        ensure_disk_space(dst.parent, expected_size)
 
     url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
     part = dst.with_suffix(dst.suffix + ".part")
     resume_from = part.stat().st_size if part.exists() else 0
+    if expected_size is None and resume_from > 0:
+        # Without reliable upstream size, avoid risking a bad append if Range is ignored.
+        part.unlink(missing_ok=True)
+        resume_from = 0
 
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "llamacpp-paranoid-deploy/1.0")
@@ -188,11 +262,11 @@ def download_hf_file(
         die(f"Download failed for {dst.name}: {e}")
 
     got_size = part.stat().st_size
-    if got_size != expected_size:
+    if expected_size is not None and got_size != expected_size:
         die(f"Size mismatch for {dst.name}. Expected {expected_size}, got {got_size} bytes.")
 
     got_sha = h.hexdigest()
-    if got_sha.lower() != expected_sha256.lower():
+    if expected_sha256 and got_sha.lower() != expected_sha256.lower():
         die(
             f"SHA256 mismatch for {dst.name}\n"
             f"Expected: {expected_sha256}\n"
@@ -202,7 +276,12 @@ def download_hf_file(
     import os
     part.replace(dst)
     os.chmod(dst, 0o644)
-    tqdm.write(f"[OK] Downloaded {dst.name}, sha256 verified.")
+    if expected_sha256:
+        tqdm.write(f"[OK] Downloaded {dst.name}, sha256 verified.")
+    else:
+        tqdm.write(f"[OK] Downloaded {dst.name}.")
+        tqdm.write(f"[WARN] Upstream sha256 unavailable; local sha256={got_sha}")
+    return got_sha, got_size
 
 
 # ---------------------------------------------------------------------------
@@ -224,41 +303,70 @@ def resolve_model(spec: ModelSpec, dst_dir: Path, hf_token: Optional[str]) -> Mo
     """
     from tqdm import tqdm
 
+    def _resolve_from_repo(repo: str, pick_spec: ModelSpec) -> Tuple[str, Optional[int], Optional[str]]:
+        tqdm.write(f"[HF] Querying metadata for {repo}")
+        meta = hf_model_metadata(repo, hf_token)
+        filename, size, sha256 = pick_hf_file(meta, pick_spec)
+        if size is None or sha256 is None:
+            probed_size, probed_sha = probe_hf_resolve_metadata(repo, filename, hf_token)
+            size = size if size is not None else probed_size
+            sha256 = sha256 if sha256 is not None else probed_sha
+        return filename, size, sha256
+
     resolved_repo = spec.hf_repo
-    tqdm.write(f"[HF] Querying metadata for {resolved_repo}")
-    meta = hf_model_metadata(resolved_repo, hf_token)
-
+    primary: Optional[Tuple[str, Optional[int], Optional[str]]] = None
+    primary_err: Optional[ValueError] = None
     try:
-        filename, size, sha256 = pick_hf_file(meta, spec)
+        primary = _resolve_from_repo(spec.hf_repo, spec)
     except ValueError as e:
-        fallback_repo = _METADATA_FALLBACK_REPOS.get(spec.hf_repo)
-        if fallback_repo and "missing sha256/size" in str(e):
-            tqdm.write(f"[WARN] {e}")
-            tqdm.write(f"[HF] Retrying metadata from fallback repo: {fallback_repo}")
-            log_line(f"[HF] Retrying metadata from fallback repo: {fallback_repo}")
+        primary_err = e
 
-            fallback_spec = ModelSpec(
-                hf_repo=fallback_repo,
-                candidate_patterns=spec.candidate_patterns,
-                ctx_len=spec.ctx_len,
-                alias=spec.effective_alias,  # keep original served model alias stable
-                is_embedding=spec.is_embedding,
-            )
-            resolved_repo = fallback_repo
-            meta = hf_model_metadata(resolved_repo, hf_token)
-            try:
-                filename, size, sha256 = pick_hf_file(meta, fallback_spec)
-            except ValueError as e2:
-                die(f"{e} Fallback repo '{fallback_repo}' also failed: {e2}")
-        else:
-            die(str(e))
+    fallback_repo = _METADATA_FALLBACK_REPOS.get(spec.hf_repo)
+    chosen = primary
 
-    tqdm.write(
-        f"[HF] Resolved from {resolved_repo}: {filename} "
-        f"({size / 1e9:.2f} GB, sha256={sha256[:12]}...)"
-    )
+    if fallback_repo and (primary_err is not None or (primary and (primary[1] is None or primary[2] is None))):
+        reason = str(primary_err) if primary_err else f"HF metadata for '{primary[0]}' is missing sha256/size."
+        tqdm.write(f"[WARN] {reason}")
+        tqdm.write(f"[HF] Retrying metadata from fallback repo: {fallback_repo}")
+        log_line(f"[HF] Retrying metadata from fallback repo: {fallback_repo}")
+        fallback_spec = ModelSpec(
+            hf_repo=fallback_repo,
+            candidate_patterns=spec.candidate_patterns,
+            ctx_len=spec.ctx_len,
+            alias=spec.effective_alias,  # keep served model alias stable
+            is_embedding=spec.is_embedding,
+        )
+        try:
+            fb = _resolve_from_repo(fallback_repo, fallback_spec)
+            if primary is None:
+                chosen = fb
+                resolved_repo = fallback_repo
+            else:
+                primary_score = int(primary[1] is not None) + int(primary[2] is not None)
+                fb_score = int(fb[1] is not None) + int(fb[2] is not None)
+                if fb_score >= primary_score:
+                    chosen = fb
+                    resolved_repo = fallback_repo
+        except ValueError as e2:
+            if primary_err is not None:
+                die(f"{primary_err} Fallback repo '{fallback_repo}' also failed: {e2}")
+            tqdm.write(f"[WARN] Fallback repo '{fallback_repo}' did not improve resolution: {e2}")
+
+    if primary_err is not None and chosen is None:
+        die(str(primary_err))
+    assert chosen is not None
+    filename, size, sha256 = chosen
+
+    if size is None:
+        tqdm.write(f"[WARN] Size unavailable for {filename}; progress may not show total bytes.")
+    if sha256 is None:
+        tqdm.write(f"[WARN] sha256 unavailable for {filename}; strict checksum verification is skipped.")
+
+    size_txt = f"{size / 1e9:.2f} GB" if size is not None else "size=?"
+    sha_txt = f"{sha256[:12]}..." if sha256 else "sha256=?"
+    tqdm.write(f"[HF] Resolved from {resolved_repo}: {filename} ({size_txt}, {sha_txt})")
 
     dst = dst_dir / filename
-    download_hf_file(resolved_repo, filename, dst, sha256, size, hf_token)
+    local_sha, local_size = download_hf_file(resolved_repo, filename, dst, sha256, size, hf_token)
 
-    return spec.with_resolved(filename=filename, sha256=sha256, size=size)
+    return spec.with_resolved(filename=filename, sha256=local_sha, size=local_size)
