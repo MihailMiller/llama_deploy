@@ -76,6 +76,7 @@ def hf_model_metadata(repo: str, hf_token: Optional[str]) -> Dict[str, Any]:
 
 def probe_hf_resolve_metadata(
     repo: str,
+    revision: str,
     filename: str,
     hf_token: Optional[str],
 ) -> Tuple[Optional[int], Optional[str]]:
@@ -85,7 +86,7 @@ def probe_hf_resolve_metadata(
     Some public HF repos omit lfs.sha256/size in /api/models payload. We try to
     recover size and checksum from response headers (if exposed).
     """
-    url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
+    url = f"https://huggingface.co/{repo}/resolve/{revision}/{filename}"
     req = urllib.request.Request(url, method="HEAD")
     req.add_header("User-Agent", "llamacpp-paranoid-deploy/1.0")
     if hf_token:
@@ -176,6 +177,7 @@ def ensure_disk_space(dst_dir: Path, required_bytes: int, headroom: float = 1.20
 
 def download_hf_file(
     repo: str,
+    revision: str,
     filename: str,
     dst: Path,
     expected_sha256: Optional[str],
@@ -216,8 +218,23 @@ def download_hf_file(
     if expected_size is not None:
         ensure_disk_space(dst.parent, expected_size)
 
-    url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
     part = dst.with_suffix(dst.suffix + ".part")
+    if part.exists() and expected_size is not None and expected_sha256:
+        part_size = part.stat().st_size
+        if part_size > expected_size:
+            part.unlink(missing_ok=True)
+        elif part_size == expected_size:
+            part_sha = sha256_file(part)
+            if part_sha.lower() == expected_sha256.lower():
+                import os
+                part.replace(dst)
+                os.chmod(dst, 0o644)
+                tqdm.write(f"[OK] Reused complete {part.name}, sha256 verified.")
+                return part_sha, expected_size
+            tqdm.write(f"[WARN] Discarding stale {part.name}; checksum does not match expected revision.")
+            part.unlink(missing_ok=True)
+
+    url = f"https://huggingface.co/{repo}/resolve/{revision}/{filename}"
     resume_from = part.stat().st_size if part.exists() else 0
     if expected_size is None and resume_from > 0:
         # Without reliable upstream size, avoid risking a bad append if Range is ignored.
@@ -303,18 +320,19 @@ def resolve_model(spec: ModelSpec, dst_dir: Path, hf_token: Optional[str]) -> Mo
     """
     from tqdm import tqdm
 
-    def _resolve_from_repo(repo: str, pick_spec: ModelSpec) -> Tuple[str, Optional[int], Optional[str]]:
+    def _resolve_from_repo(repo: str, pick_spec: ModelSpec) -> Tuple[str, Optional[int], Optional[str], str]:
         tqdm.write(f"[HF] Querying metadata for {repo}")
         meta = hf_model_metadata(repo, hf_token)
+        revision = str(meta.get("sha") or "main")
         filename, size, sha256 = pick_hf_file(meta, pick_spec)
         if size is None or sha256 is None:
-            probed_size, probed_sha = probe_hf_resolve_metadata(repo, filename, hf_token)
+            probed_size, probed_sha = probe_hf_resolve_metadata(repo, revision, filename, hf_token)
             size = size if size is not None else probed_size
             sha256 = sha256 if sha256 is not None else probed_sha
-        return filename, size, sha256
+        return filename, size, sha256, revision
 
     resolved_repo = spec.hf_repo
-    primary: Optional[Tuple[str, Optional[int], Optional[str]]] = None
+    primary: Optional[Tuple[str, Optional[int], Optional[str], str]] = None
     primary_err: Optional[ValueError] = None
     try:
         primary = _resolve_from_repo(spec.hf_repo, spec)
@@ -355,7 +373,7 @@ def resolve_model(spec: ModelSpec, dst_dir: Path, hf_token: Optional[str]) -> Mo
     if primary_err is not None and chosen is None:
         die(str(primary_err))
     assert chosen is not None
-    filename, size, sha256 = chosen
+    filename, size, sha256, revision = chosen
 
     if size is None:
         tqdm.write(f"[WARN] Size unavailable for {filename}; progress may not show total bytes.")
@@ -364,9 +382,9 @@ def resolve_model(spec: ModelSpec, dst_dir: Path, hf_token: Optional[str]) -> Mo
 
     size_txt = f"{size / 1e9:.2f} GB" if size is not None else "size=?"
     sha_txt = f"{sha256[:12]}..." if sha256 else "sha256=?"
-    tqdm.write(f"[HF] Resolved from {resolved_repo}: {filename} ({size_txt}, {sha_txt})")
+    tqdm.write(f"[HF] Resolved from {resolved_repo}@{revision[:12]}: {filename} ({size_txt}, {sha_txt})")
 
     dst = dst_dir / filename
-    local_sha, local_size = download_hf_file(resolved_repo, filename, dst, sha256, size, hf_token)
+    local_sha, local_size = download_hf_file(resolved_repo, revision, filename, dst, sha256, size, hf_token)
 
     return spec.with_resolved(filename=filename, sha256=local_sha, size=local_size)
