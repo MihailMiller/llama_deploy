@@ -901,10 +901,37 @@ def _print_summary(cfg, api_token: str, first_run: bool, unverified_models: list
     print("  python -m llama_deploy tokens create --name <name>")
     print("  python -m llama_deploy tokens revoke <id>")
     print()
-    print("Client usage:")
-    print("  Authorization: Bearer <token>")
-    print(f'  POST /v1/chat/completions  model="{cfg.llm.effective_alias}"')
-    print(f'  POST /v1/embeddings        model="{cfg.emb.effective_alias}"')
+    base_url  = cfg.public_base_url.rstrip("/")
+    llm_model = cfg.llm.effective_alias
+    emb_model = cfg.emb.effective_alias
+    # Use the real token in examples on first run so they are copy-pasteable.
+    # On re-deploy the smoke-test token is already revoked; show a placeholder.
+    tok = api_token if first_run else "<your-token>"
+
+    print("Quick-start  (copy-paste ready)")
+    print()
+    print("  # List available models")
+    print(f"  curl {base_url}/v1/models \\")
+    print(f"    -H 'Authorization: Bearer {tok}'")
+    print()
+    print("  # Chat completion")
+    print(f"  curl {base_url}/v1/chat/completions \\")
+    print(f"    -H 'Authorization: Bearer {tok}' \\")
+    print( "    -H 'Content-Type: application/json' \\")
+    print(f"    -d '{{\"model\":\"{llm_model}\",\"messages\":[{{\"role\":\"user\",\"content\":\"Hello!\"}}]}}'")
+    print()
+    print("  # Embeddings")
+    print(f"  curl {base_url}/v1/embeddings \\")
+    print(f"    -H 'Authorization: Bearer {tok}' \\")
+    print( "    -H 'Content-Type: application/json' \\")
+    print(f"    -d '{{\"model\":\"{emb_model}\",\"input\":\"text to embed\"}}'")
+    print()
+    print("  # Python (pip install openai)")
+    print( "  from openai import OpenAI")
+    print(f"  client = OpenAI(base_url=\"{base_url}/v1\", api_key=\"{tok}\")")
+    print(f"  r = client.chat.completions.create(model=\"{llm_model}\",")
+    print( "        messages=[{\"role\": \"user\", \"content\": \"Hello!\"}])")
+    print( "  print(r.choices[0].message.content)")
     print()
 
     if unverified_models:
