@@ -562,7 +562,10 @@ def run_deploy(cfg) -> None:
     log_line("Args: " + redact(" ".join(sys.argv)))
 
     # Ensure directories exist before any step runs
-    for d in (cfg.models_dir, cfg.presets_dir, cfg.cache_dir, cfg.secrets_dir):
+    dirs = [cfg.models_dir, cfg.presets_dir, cfg.cache_dir, cfg.secrets_dir]
+    if cfg.enable_webui:
+        dirs.append(cfg.base_dir / "webui")
+    for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
 
     # Detect first-run before the token step runs (for post-deploy message)
@@ -694,6 +697,7 @@ def run_deploy(cfg) -> None:
             upstream_port=cfg.llama_internal_port,
             configure_ufw=cfg.network.configure_ufw,
             use_auth_sidecar=True,
+            webui_port=cfg.webui_port if cfg.enable_webui else 0,
             sidecar_port=cfg.sidecar_port,
         )
         if selected_port != cfg.network.port:
@@ -727,6 +731,7 @@ def run_deploy(cfg) -> None:
             configure_ufw=cfg.network.configure_ufw,
             use_auth_sidecar=cfg.auth_mode == AuthMode.HASHED,
             sidecar_port=cfg.sidecar_port,
+            webui_port=cfg.webui_port if cfg.enable_webui else 0,
         )
 
     tls_step = Step(
@@ -897,6 +902,8 @@ def _print_summary(cfg, api_token: str, first_run: bool, unverified_models: list
 
     print()
     print(f"  Endpoint : {cfg.public_base_url}")
+    if cfg.enable_webui:
+        print(f"  Open WebUI: http://{cfg.webui_host}:{cfg.webui_port}")
     print(f"  Auth mode: {cfg.auth_mode.value}")
     print(f"  Base dir : {cfg.base_dir}")
     print()

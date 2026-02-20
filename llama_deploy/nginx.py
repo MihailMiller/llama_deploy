@@ -109,6 +109,36 @@ def _pick_free_bind_port(bind_host: str, preferred: int, *, avoid: set[int] | No
     die(f"Could not find a free TCP port on {bind_host} for local NGINX proxy.")
 
 
+def _webui_location_block(webui_port: int) -> str:
+    """
+    Return an NGINX location / block that proxies to Open WebUI.
+
+    Includes WebSocket upgrade headers required for Open WebUI's streaming
+    responses and real-time features.
+    """
+    return f"""
+    # Open WebUI — served at domain root; protected by Open WebUI's own user auth
+    location / {{
+        proxy_pass         http://127.0.0.1:{webui_port};
+        proxy_http_version 1.1;
+
+        # WebSocket support (required for Open WebUI streaming)
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_buffering    off;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout  10s;
+        proxy_send_timeout 300s;
+    }}
+"""
+
+
 def _auth_request_block() -> str:
     """Return the auth_request directive line."""
     return """\
@@ -139,21 +169,75 @@ def write_nginx_proxy_config(
     *,
     use_auth_sidecar: bool = False,
     sidecar_port: int = 9000,
+    webui_port: int = 0,
 ) -> None:
     """
-    Write an initial HTTP-only NGINX site config that proxies to
-    llama-server on localhost. certbot will later add the SSL server block.
+    Write an initial HTTP-only NGINX site config. certbot will later add the SSL block.
 
-    When use_auth_sidecar=True, auth_request is added so that every request
-    is checked against the llama-auth sidecar before being proxied.
+    Without webui_port: single location / proxies all traffic to llama-server (with auth).
+    With webui_port: splits routing — /v1/ goes to llama-server (auth enforced),
+                     / goes to Open WebUI (its own user auth).
     """
     from llama_deploy.system import backup_file, write_file
 
     name = _config_name(domain)
     config_path = _SITES_AVAILABLE / name
 
-    auth_req   = _auth_request_block() if use_auth_sidecar else ""
-    auth_loc   = _auth_location_block(sidecar_port) if use_auth_sidecar else ""
+    auth_req = _auth_request_block() if use_auth_sidecar else ""
+    auth_loc = _auth_location_block(sidecar_port) if use_auth_sidecar else ""
+
+    if webui_port:
+        # Split routing: API at /v1/ (auth-gated) + Open WebUI at / (own auth)
+        api_location = f"""
+    # LLM API — bearer token required
+    location /v1/ {{
+{auth_req}        proxy_pass         http://127.0.0.1:{upstream_port};
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+
+        proxy_buffering            off;
+        proxy_cache                off;
+        proxy_request_buffering    off;
+
+        proxy_read_timeout    300s;
+        proxy_connect_timeout  10s;
+        proxy_send_timeout    300s;
+
+        client_max_body_size 32m;
+    }}
+"""
+        webui_loc = _webui_location_block(webui_port)
+        body = api_location + auth_loc + webui_loc
+    else:
+        # Single location: all traffic goes to llama-server (with optional auth)
+        body = f"""
+    # Proxy all requests to llama-server
+    location / {{
+{auth_req}        proxy_pass         http://127.0.0.1:{upstream_port};
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+
+        proxy_buffering            off;
+        proxy_cache                off;
+        proxy_request_buffering    off;
+
+        proxy_read_timeout    300s;
+        proxy_connect_timeout  10s;
+        proxy_send_timeout    300s;
+
+        client_max_body_size 32m;
+    }}
+{auth_loc}"""
 
     content = f"""# llama-server proxy — managed by llama_deploy
 # certbot will add an SSL server block below this one.
@@ -166,32 +250,7 @@ server {{
     location /.well-known/acme-challenge/ {{
         root /var/www/html;
     }}
-
-    # Proxy all other requests to llama-server
-    location / {{
-{auth_req}        proxy_pass         http://127.0.0.1:{upstream_port};
-        proxy_http_version 1.1;
-
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Connection        "";
-
-        # LLM streaming: disable buffering so tokens reach the client immediately
-        proxy_buffering            off;
-        proxy_cache                off;
-        proxy_request_buffering    off;
-
-        # Long timeout for inference (default 60s is too short for large models)
-        proxy_read_timeout    300s;
-        proxy_connect_timeout  10s;
-        proxy_send_timeout    300s;
-
-        # Allow large prompts
-        client_max_body_size 32m;
-    }}
-{auth_loc}}}
+{body}}}
 """
     write_file(config_path, content, mode=0o644)
 
@@ -218,12 +277,13 @@ def write_nginx_local_config(
     *,
     use_auth_sidecar: bool = False,
     sidecar_port: int = 9000,
+    webui_port: int = 0,
 ) -> None:
     """
     Write a local (non-TLS) NGINX site config for hashed auth without a domain.
 
-    Listens on bind_host:port and proxies to llama-server on upstream_port.
-    When use_auth_sidecar=True, every request is checked against the sidecar.
+    Without webui_port: all traffic proxied to llama-server (with auth).
+    With webui_port: /v1/ → llama-server (auth), / → Open WebUI (own auth).
     """
     from llama_deploy.system import write_file
 
@@ -233,11 +293,31 @@ def write_nginx_local_config(
     auth_req = _auth_request_block() if use_auth_sidecar else ""
     auth_loc = _auth_location_block(sidecar_port) if use_auth_sidecar else ""
 
-    content = f"""# llama-server local proxy — managed by llama_deploy
-server {{
-    listen {bind_host}:{port};
-    server_name _;
+    if webui_port:
+        api_location = f"""
+    location /v1/ {{
+{auth_req}        proxy_pass         http://127.0.0.1:{upstream_port};
+        proxy_http_version 1.1;
 
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header Connection        "";
+
+        proxy_buffering            off;
+        proxy_cache                off;
+        proxy_request_buffering    off;
+
+        proxy_read_timeout    300s;
+        proxy_connect_timeout  10s;
+        proxy_send_timeout    300s;
+
+        client_max_body_size 32m;
+    }}
+"""
+        body = api_location + auth_loc + _webui_location_block(webui_port)
+    else:
+        body = f"""
     location / {{
 {auth_req}        proxy_pass         http://127.0.0.1:{upstream_port};
         proxy_http_version 1.1;
@@ -257,7 +337,13 @@ server {{
 
         client_max_body_size 32m;
     }}
-{auth_loc}}}
+{auth_loc}"""
+
+    content = f"""# llama-server local proxy — managed by llama_deploy
+server {{
+    listen {bind_host}:{port};
+    server_name _;
+{body}}}
 """
     write_file(config_path, content, mode=0o644)
 
@@ -329,6 +415,7 @@ def ensure_tls_for_domain(
     *,
     use_auth_sidecar: bool = False,
     sidecar_port: int = 9000,
+    webui_port: int = 0,
 ) -> None:
     """
     Full TLS setup pipeline. Safe to call on re-deployment.
@@ -355,6 +442,7 @@ def ensure_tls_for_domain(
         domain, upstream_port,
         use_auth_sidecar=use_auth_sidecar,
         sidecar_port=sidecar_port,
+        webui_port=webui_port,
     )
 
     if configure_ufw:
@@ -374,6 +462,7 @@ def ensure_local_proxy(
     *,
     use_auth_sidecar: bool = False,
     sidecar_port: int = 9000,
+    webui_port: int = 0,
 ) -> int:
     """
     Set up NGINX as a local (non-TLS) reverse proxy for hashed auth mode
@@ -412,6 +501,7 @@ def ensure_local_proxy(
         bind_host, selected_port, upstream_port,
         use_auth_sidecar=use_auth_sidecar,
         sidecar_port=sidecar_port,
+        webui_port=webui_port,
     )
 
     if configure_ufw and bind_host == "0.0.0.0":

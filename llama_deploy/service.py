@@ -20,12 +20,33 @@ Two compose layouts are generated depending on cfg.auth_mode:
 
 from __future__ import annotations
 
+import os
+import secrets as _secrets
 from pathlib import Path
 from shlex import quote
 
 from llama_deploy.config import AccessProfile, AuthMode, Config, DockerNetworkMode, ModelSpec
 from llama_deploy.log import sh
 from llama_deploy.system import write_file
+
+
+# ---------------------------------------------------------------------------
+# Open WebUI secret key
+# ---------------------------------------------------------------------------
+
+def _load_or_create_webui_secret(base_dir: Path) -> str:
+    """
+    Return a stable WEBUI_SECRET_KEY, generating and persisting it on first use.
+    Persisting avoids invalidating Open WebUI sessions on every redeploy.
+    """
+    key_path = base_dir / "secrets" / "webui_secret.key"
+    if key_path.exists():
+        return key_path.read_text(encoding="utf-8").strip()
+    key = _secrets.token_hex(32)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(key + "\n", encoding="utf-8")
+    os.chmod(key_path, 0o600)
+    return key
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +294,35 @@ def _write_compose_hashed(compose_path: Path, cfg: Config) -> None:
         else ""
     )
 
+    webui_block = ""
+    if cfg.enable_webui:
+        webui_secret = _load_or_create_webui_secret(cfg.base_dir)
+        emb_alias = cfg.emb.effective_alias
+        webui_block = f"""
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "{cfg.webui_host}:{cfg.webui_port}:8080"
+    volumes:
+      - {cfg.base_dir}/webui:/app/backend/data
+    environment:
+      # Chat — connects to llama-server on the internal Docker network (no auth layer needed)
+      - OPENAI_API_BASE_URL=http://llama:8080/v1
+      - OPENAI_API_KEY=sk-internal
+      # RAG embeddings
+      - RAG_EMBEDDING_ENGINE=openai
+      - RAG_OPENAI_API_BASE_URL=http://llama:8080/v1
+      - RAG_OPENAI_API_KEY=sk-internal
+      - RAG_EMBEDDING_MODEL={emb_alias}
+      # Disable built-in Ollama connection attempt
+      - ENABLE_OLLAMA_API=false
+      - WEBUI_SECRET_KEY={webui_secret}
+    depends_on:
+      - llama
+"""
+
     content = f"""services:
   llama:
     image: {cfg.image}
@@ -326,7 +376,7 @@ def _write_compose_hashed(compose_path: Path, cfg: Config) -> None:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
-"""
+{webui_block}"""
     write_file(compose_path, content, mode=0o644)
 
 

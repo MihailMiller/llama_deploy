@@ -300,6 +300,9 @@ class Config:
     docker_network_mode: DockerNetworkMode = DockerNetworkMode.BRIDGE  # Docker network mode for containers
     llama_internal_port: int = 8081  # host loopback port for llama-server in hashed mode
     sidecar_port: int = 9000         # host loopback port for auth sidecar in hashed mode
+    enable_webui: bool = False        # include Open WebUI in docker-compose
+    webui_port: int = 3000            # host port for Open WebUI
+    webui_host: str = "127.0.0.1"     # bind host for Open WebUI
 
     def __post_init__(self) -> None:
         normalized_domain = normalize_domain(self.domain)

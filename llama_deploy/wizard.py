@@ -158,7 +158,7 @@ def _confirm(msg: str, default: bool = True) -> bool:
 # ---------------------------------------------------------------------------
 
 def _step_backend() -> BackendKind:
-    _header(1, 5, "Backend")
+    _header(1, 6, "Backend")
     options = [
         ("CPU only",     "works everywhere — no GPU required"),
         ("NVIDIA GPU",   "CUDA — requires nvidia-docker"),
@@ -173,7 +173,7 @@ def _step_backend() -> BackendKind:
 
 
 def _step_models() -> Tuple[ModelSpec, ModelSpec]:
-    _header(2, 5, "Models")
+    _header(2, 6, "Models")
 
     # --- LLM ---
     _section("Text generation model (LLM)")
@@ -338,7 +338,7 @@ def _step_network() -> Tuple[NetworkConfig, Optional[str], Optional[str]]:
     are derived from the chosen profile.  The caller passes domain and
     certbot_email through to Config so the orchestrator can run nginx.py.
     """
-    _header(3, 5, "Network / Access Profile")
+    _header(3, 6, "Network / Access Profile")
     print("  Choose who should be able to reach the API:")
     print()
     options = [
@@ -440,7 +440,7 @@ def _step_network() -> Tuple[NetworkConfig, Optional[str], Optional[str]]:
 
 
 def _step_token() -> Tuple[str, AuthMode]:
-    _header(4, 5, "API Token")
+    _header(4, 6, "API Token")
     print("  You will receive an API key to authenticate requests.")
     print("  Give it a name so you can identify and revoke it later.")
     print()
@@ -453,13 +453,31 @@ def _step_token() -> Tuple[str, AuthMode]:
     return name or "default", auth_mode
 
 
+def _step_webui() -> Tuple[bool, int, str]:
+    """Ask whether to add Open WebUI. Returns (enable, port, bind_host)."""
+    _header(5, 6, "Web Interface")
+    _info("Open WebUI adds a browser-based chat + RAG (document Q&A) interface.")
+    _info("It connects to llama-server on the internal Docker network.")
+    print()
+    options = [
+        ("Skip",    "API only — no web interface"),
+        ("Install", "add Open WebUI (browser chat + RAG)"),
+    ]
+    idx = _choose(options, default=1)
+    if idx == 1:
+        return False, 3000, "127.0.0.1"
+
+    port = _prompt_int("Open WebUI port", default=3000, min_val=1024, max_val=65535)
+    return True, port, "127.0.0.1"
+
+
 def _step_system(network: NetworkConfig) -> Tuple[int, str, Optional[str], DockerNetworkMode]:
     """
     Returns (swap_gib, base_dir, tailscale_authkey_or_None, docker_network_mode).
 
     tailscale_authkey is only prompted when access_profile == VPN_ONLY.
     """
-    _header(5, 5, "System")
+    _header(6, 6, "System")
     swap_gib = _prompt_int("Swap file to create if none exists (GiB)", default=8, min_val=0, max_val=256)
     base_dir = _prompt("Base directory for models, config, secrets", default="/opt/llama")
 
@@ -585,6 +603,7 @@ def run_wizard() -> Config:
     network, domain, certbot_email = _step_network()
     token_name, auth_mode = _step_token()
     network = _commit_local_hashed_proxy_port(network, auth_mode, domain)
+    enable_webui, webui_port, webui_host = _step_webui()
     swap_gib, base_dir_str, tailscale_authkey, docker_network_mode = _step_system(network)
 
     from pathlib import Path
@@ -608,6 +627,9 @@ def run_wizard() -> Config:
         auth_mode=auth_mode,
         tailscale_authkey=tailscale_authkey,
         docker_network_mode=docker_network_mode,
+        enable_webui=enable_webui,
+        webui_port=webui_port,
+        webui_host=webui_host,
     )
 
     # Apply auto-optimize before review so the user sees the final model/ctx

@@ -149,6 +149,14 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
                         "Skipped by default (large models take >5 min to load). "
                         "Enable in CI or when you want to verify the service before the summary.")
 
+    g = parser.add_argument_group("Open WebUI")
+    g.add_argument("--webui", action="store_true",
+                   help="Add Open WebUI browser interface (chat + RAG) to the deployment.")
+    g.add_argument("--webui-port", type=int, default=3000, metavar="PORT",
+                   help="Host port for Open WebUI. (default: 3000)")
+    g.add_argument("--webui-host", default="127.0.0.1", metavar="HOST",
+                   help="Bind host for Open WebUI. (default: 127.0.0.1)")
+
     g = parser.add_argument_group("HTTPS / TLS (NGINX + Let's Encrypt)")
     g.add_argument("--domain", default=None, metavar="DOMAIN",
                    help=(
@@ -263,6 +271,9 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
         auth_mode=AuthMode(raw.auth_mode),
         tailscale_authkey=tailscale_authkey,
         docker_network_mode=DockerNetworkMode(raw.docker_network_mode),
+        enable_webui=raw.webui,
+        webui_port=raw.webui_port,
+        webui_host=raw.webui_host,
     )
 
 
