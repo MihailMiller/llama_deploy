@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llama-deploy"
+version = "0.1.0"
+description = "Deploy llama.cpp as a private OpenAI-compatible API on Ubuntu."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "llama_deploy contributors" }]
+dependencies = []
+
+[tool.setuptools]
+packages = ["llama_deploy"]

@@ -1,0 +1,434 @@
+"""
+Command-line interface: subcommand dispatcher and batch-mode config builder.
+
+Subcommands
+-----------
+  python -m llama_deploy                         # wizard if TTY, else --help
+  python -m llama_deploy deploy                  # same
+  python -m llama_deploy deploy --batch [flags]  # non-interactive (CI/scripts)
+  python -m llama_deploy tokens list    [--base-dir DIR]
+  python -m llama_deploy tokens create  --name NAME  [--base-dir DIR]
+  python -m llama_deploy tokens revoke  <id>  [--base-dir DIR]
+  python -m llama_deploy tokens show    <id>  [--base-dir DIR]
+
+`build_config(argv)` is the batch-mode parser. It is also the source of truth
+for all available flags and their defaults. The wizard hardcodes its own
+defaults because it shows human-readable choices, not raw argparse strings.
+
+Batch-mode parameter fixes vs original script
+---------------------------------------------
+  --public + --bind + --no-publish  →  --bind HOST  (explicit) + --no-publish
+  --allow-public-port               →  --open-firewall  (validated)
+  --no-ufw                          →  --skip-ufw
+  llm_candidates hardcoded          →  --llm-candidates (comma list)
+  emb_candidates hardcoded          →  --emb-candidates (comma list)
+  (new)                             →  --skip-download
+  (new)                             →  --token-name
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import json
+from pathlib import Path
+from typing import List, Optional
+
+from llama_deploy.config import AuthMode, BackendKind, Config, ModelSpec, NetworkConfig
+
+_DEFAULT_LLM_CANDIDATES = "Q4_K_M,Q5_K_M,Q4_0,Q3_K_M"
+_DEFAULT_EMB_CANDIDATES = "Q8_0,F16,Q6_K,Q4_K_M"
+
+
+# ---------------------------------------------------------------------------
+# Batch-mode config builder
+# ---------------------------------------------------------------------------
+
+def build_config(argv: Optional[List[str]] = None) -> Config:
+    """
+    Parse argv (defaults to sys.argv[1:]) and return an immutable Config.
+    All cross-argument validation is done here via parser.error().
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m llama_deploy deploy --batch",
+        description="Deploy llama.cpp (llama-server) as an OpenAI-compatible Docker service (non-interactive).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    g = parser.add_argument_group("Paths")
+    g.add_argument("--base-dir", default="/opt/llama", metavar="DIR",
+                   help="Base directory for models, config, cache, secrets. (default: /opt/llama)")
+
+    g = parser.add_argument_group("Backend")
+    g.add_argument("--backend", default="cpu", choices=[b.value for b in BackendKind],
+                   help="llama.cpp Docker image variant. (default: cpu)")
+
+    g = parser.add_argument_group("Network")
+    g.add_argument("--bind", default="127.0.0.1", metavar="HOST",
+                   help="Host address to bind the published port to. Use 0.0.0.0 for public. (default: 127.0.0.1)")
+    g.add_argument("--port", type=int, default=8080,
+                   help="Host port to publish. (default: 8080)")
+    g.add_argument("--no-publish", action="store_true",
+                   help="Do NOT publish any host port (Docker-network-only).")
+    g.add_argument("--open-firewall", action="store_true",
+                   help="Open --port in UFW. Requires --bind 0.0.0.0.")
+    g.add_argument("--skip-ufw", action="store_true",
+                   help="Do not configure UFW at all.")
+
+    g = parser.add_argument_group("System")
+    g.add_argument("--swap-gib", type=int, default=8, metavar="GIB",
+                   help="Swap file size if none exists. (default: 8)")
+
+    g = parser.add_argument_group("Authentication")
+    g.add_argument("--token", default=None, metavar="TOKEN",
+                   help="API token value. If omitted, a random token is generated.")
+    g.add_argument("--token-name", default="default", metavar="NAME",
+                   help="Label for the first API token. (default: default)")
+    g.add_argument("--auth-mode", default="plaintext", choices=[m.value for m in AuthMode],
+                   metavar="MODE",
+                   help="Token storage strategy: 'plaintext' (llama-server --api-key-file) "
+                        "or 'hashed' (SHA-256 stored; NGINX auth_request sidecar). "
+                        "(default: plaintext)")
+    g.add_argument("--hf-token", default=None, metavar="TOKEN",
+                   help="HuggingFace access token. Falls back to HF_TOKEN env var.")
+
+    g = parser.add_argument_group("Models")
+    g.add_argument("--llm-repo", default="Qwen/Qwen3-8B-GGUF", metavar="REPO",
+                   help="HuggingFace repo for the LLM GGUF. (default: Qwen/Qwen3-8B-GGUF)")
+    g.add_argument("--llm-candidates", default=_DEFAULT_LLM_CANDIDATES, metavar="PATTERNS",
+                   help=f"Comma-separated GGUF filename patterns for LLM. (default: {_DEFAULT_LLM_CANDIDATES})")
+    g.add_argument("--emb-repo", default="Qwen/Qwen3-Embedding-0.6B-GGUF", metavar="REPO",
+                   help="HuggingFace repo for the embedding GGUF. (default: Qwen/Qwen3-Embedding-0.6B-GGUF)")
+    g.add_argument("--emb-candidates", default=_DEFAULT_EMB_CANDIDATES, metavar="PATTERNS",
+                   help=f"Comma-separated GGUF filename patterns for embeddings. (default: {_DEFAULT_EMB_CANDIDATES})")
+    g.add_argument("--skip-download", action="store_true",
+                   help="Skip HF queries and downloads if model files are already on disk.")
+
+    g = parser.add_argument_group("HTTPS / TLS (NGINX + Let's Encrypt)")
+    g.add_argument("--domain", default=None, metavar="DOMAIN",
+                   help=(
+                       "Public domain name (e.g. api.example.com). When set, NGINX is installed "
+                       "as a TLS-terminating reverse proxy and certbot obtains a Let's Encrypt "
+                       "certificate. The Docker port stays on loopback; NGINX faces the internet. "
+                       "Requires --bind 127.0.0.1 (default). DNS A record must point to this host."
+                   ))
+    g.add_argument("--certbot-email", default=None, metavar="EMAIL",
+                   help="Email address for Let's Encrypt certificate renewal notices. Required with --domain.")
+
+    g = parser.add_argument_group("Server tuning")
+    g.add_argument("--models-max", type=int, default=2, metavar="N",
+                   help="Router: max simultaneously loaded models. (default: 2)")
+    g.add_argument("--ctx-llm", type=int, default=4096, metavar="TOKENS",
+                   help="Context window for the LLM. (default: 4096)")
+    g.add_argument("--ctx-emb", type=int, default=2048, metavar="TOKENS",
+                   help="Context window for the embedding model. (default: 2048)")
+    g.add_argument("--parallel", type=int, default=1, metavar="N",
+                   help="Router parallel slots. (default: 1)")
+
+    raw = parser.parse_args(argv)
+
+    # Cross-argument validation
+    if raw.bind == "0.0.0.0" and raw.no_publish:
+        parser.error("--bind 0.0.0.0 cannot be combined with --no-publish.")
+    if raw.open_firewall and raw.bind != "0.0.0.0":
+        parser.error("--open-firewall requires --bind 0.0.0.0.")
+    if raw.domain and raw.bind != "127.0.0.1":
+        parser.error("--domain requires --bind 127.0.0.1 (NGINX proxies to loopback).")
+    if raw.domain and not raw.certbot_email:
+        parser.error("--certbot-email is required when --domain is set.")
+    if raw.certbot_email and not raw.domain:
+        parser.error("--certbot-email has no effect without --domain.")
+
+    hf_token: Optional[str] = raw.hf_token or os.environ.get("HF_TOKEN") or None
+
+    network = NetworkConfig(
+        bind_host=raw.bind,
+        port=raw.port,
+        publish=not raw.no_publish,
+        open_firewall=raw.open_firewall,
+        configure_ufw=not raw.skip_ufw,
+    )
+    llm_spec = ModelSpec(
+        hf_repo=raw.llm_repo,
+        candidate_patterns=[p.strip() for p in raw.llm_candidates.split(",") if p.strip()],
+        ctx_len=raw.ctx_llm,
+    )
+    emb_spec = ModelSpec(
+        hf_repo=raw.emb_repo,
+        candidate_patterns=[p.strip() for p in raw.emb_candidates.split(",") if p.strip()],
+        ctx_len=raw.ctx_emb,
+        is_embedding=True,
+    )
+    return Config(
+        base_dir=Path(raw.base_dir),
+        backend=BackendKind(raw.backend),
+        network=network,
+        swap_gib=raw.swap_gib,
+        models_max=raw.models_max,
+        parallel=raw.parallel,
+        api_token=raw.token,
+        api_token_name=raw.token_name,
+        hf_token=hf_token,
+        skip_download=raw.skip_download,
+        llm=llm_spec,
+        emb=emb_spec,
+        domain=raw.domain or None,
+        certbot_email=raw.certbot_email or None,
+        auth_mode=AuthMode(raw.auth_mode),
+    )
+
+
+# ---------------------------------------------------------------------------
+# `tokens` subcommand handlers
+# ---------------------------------------------------------------------------
+
+def _detect_auth_mode(base_dir: Path) -> AuthMode:
+    """
+    Infer token auth mode from on-disk secrets.
+
+    Priority:
+      1) token_hashes.json (hashed) vs api_keys (plaintext)
+      2) tokens.json record shape
+      3) plaintext fallback for empty/new stores
+    """
+    secrets = base_dir / "secrets"
+    hash_file = secrets / "token_hashes.json"
+    key_file = secrets / "api_keys"
+    token_file = secrets / "tokens.json"
+
+    if hash_file.exists() and not key_file.exists():
+        return AuthMode.HASHED
+    if key_file.exists() and not hash_file.exists():
+        return AuthMode.PLAINTEXT
+
+    if token_file.exists():
+        try:
+            data = json.loads(token_file.read_text(encoding="utf-8"))
+            for rec in data.get("tokens", []):
+                if rec.get("hash") and not rec.get("value"):
+                    return AuthMode.HASHED
+                if rec.get("value"):
+                    return AuthMode.PLAINTEXT
+        except Exception:
+            pass
+
+    return AuthMode.PLAINTEXT
+
+
+def _tokens_list(base_dir: Path) -> None:
+    from llama_deploy.tokens import TokenStore
+    store = TokenStore(base_dir / "secrets", auth_mode=_detect_auth_mode(base_dir))
+    tokens = store.list_tokens()
+    if not tokens:
+        print("No tokens found.")
+        return
+
+    active_count  = sum(1 for t in tokens if not t.revoked)
+    revoked_count = len(tokens) - active_count
+
+    col_id    = 20
+    col_name  = 18
+    col_st    = 9
+    col_date  = 10
+    header = (
+        f"{'ID':<{col_id}}  {'Name':<{col_name}}  {'Status':<{col_st}}  {'Created':<{col_date}}"
+    )
+    sep = "─" * len(header)
+    print(f"\nAPI Tokens  ({base_dir}/secrets/tokens.json)")
+    print(sep)
+    print(header)
+    print(sep)
+    for t in tokens:
+        date = t.created_at[:10]
+        print(f"{t.id:<{col_id}}  {t.name:<{col_name}}  {t.status:<{col_st}}  {date:<{col_date}}")
+    print(sep)
+    print(f"{active_count} active, {revoked_count} revoked\n")
+
+
+def _tokens_create(base_dir: Path, name: str) -> None:
+    from llama_deploy.tokens import TokenStore
+    store = TokenStore(base_dir / "secrets", auth_mode=_detect_auth_mode(base_dir))
+    record = store.create_token(name)
+    print(f'\nCreated token "{record.name}":')
+    print(f"  ID    : {record.id}")
+    print(f"  Value : {record.value}")
+    print()
+    print("  ⚠  Store this value now — it will not be shown again.")
+    if store.auth_mode == AuthMode.HASHED:
+        print(f"     Hashfile updated: {base_dir}/secrets/token_hashes.json")
+        print("     Takes effect immediately (no container restart required).\n")
+    else:
+        print(f"     Keyfile updated: {base_dir}/secrets/api_keys")
+        print(f"     Restart llama-server to pick up the new key:")
+        print(f"     docker compose -f {base_dir}/docker-compose.yml restart llama\n")
+
+
+def _tokens_revoke(base_dir: Path, token_id: str) -> None:
+    from llama_deploy.tokens import TokenStore
+    store = TokenStore(base_dir / "secrets", auth_mode=_detect_auth_mode(base_dir))
+    try:
+        record = store.revoke_token(token_id)
+    except KeyError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    active = len(store.active_tokens())
+    print(f'\nRevoked token "{record.name}" ({record.id}).')
+    print(f"  Active tokens remaining: {active}")
+    if store.auth_mode == AuthMode.HASHED:
+        print(f"  Hashfile updated: {base_dir}/secrets/token_hashes.json")
+        print("  Revocation takes effect immediately (no container restart required).\n")
+    else:
+        print(f"  Keyfile updated: {base_dir}/secrets/api_keys")
+        print(f"  Restart llama-server to drop the revoked key:")
+        print(f"  docker compose -f {base_dir}/docker-compose.yml restart llama\n")
+    if active == 0:
+        print("  ⚠  No active tokens remain. The API will reject all requests.")
+        print(f"     Create a new token: python -m llama_deploy tokens create --name <name>\n")
+
+
+def _tokens_show(base_dir: Path, token_id: str) -> None:
+    from llama_deploy.tokens import TokenStore
+    store = TokenStore(base_dir / "secrets", auth_mode=_detect_auth_mode(base_dir))
+    try:
+        record = store.show_token(token_id)
+    except (KeyError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f'\n⚠  Displaying token value for "{record.name}" ({record.id}).')
+    try:
+        answer = input("  Confirm? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(0)
+    if answer not in ("y", "yes"):
+        print("  Aborted.")
+        sys.exit(0)
+    print(f"\n  Status : {record.status}")
+    print(f"  Value  : {record.value}\n")
+
+
+# ---------------------------------------------------------------------------
+# Top-level dispatcher
+# ---------------------------------------------------------------------------
+
+def dispatch(argv: Optional[List[str]] = None) -> None:
+    """
+    Parse the top-level subcommand and hand off to the appropriate handler.
+    Called by __main__.py.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m llama_deploy",
+        description="llama.cpp deployment and token management tool.",
+        add_help=False,
+    )
+    parser.add_argument("subcommand", nargs="?", default=None,
+                        choices=["deploy", "tokens"])
+    parser.add_argument("--help", "-h", action="store_true")
+
+    known, remaining = parser.parse_known_args(argv)
+    sub = known.subcommand
+
+    if sub is None:
+        if known.help or not sys.stdin.isatty():
+            _print_top_level_help()
+            return
+        _run_deploy_wizard()
+        return
+
+    if sub == "deploy":
+        rem = remaining or []
+        if known.help or "-h" in rem or "--help" in rem:
+            if "--batch" in rem:
+                build_config(["--help"])
+            else:
+                _print_top_level_help()
+            return
+        if "--batch" in rem:
+            remaining2 = [r for r in rem if r != "--batch"]
+            cfg = build_config(remaining2)
+            from llama_deploy.orchestrator import run_deploy
+            run_deploy(cfg)
+        elif known.help:
+            _print_top_level_help()
+        elif sys.stdin.isatty():
+            _run_deploy_wizard()
+        else:
+            _print_top_level_help()
+        return
+
+    if sub == "tokens":
+        rem = remaining or []
+        if known.help or "-h" in rem or "--help" in rem:
+            _dispatch_tokens(["-h"])
+            return
+        _dispatch_tokens(rem)
+        return
+
+
+def _print_top_level_help() -> None:
+    print(
+        "Usage: python -m llama_deploy [deploy|tokens] [options]\n\n"
+        "Subcommands:\n"
+        "  deploy              Interactive wizard (TTY) or --batch for non-interactive\n"
+        "  deploy --batch …    Non-interactive deployment (use -h for flag list)\n"
+        "  tokens list         List all API tokens\n"
+        "  tokens create       Create a new named API token\n"
+        "  tokens revoke <id>  Revoke an API token\n"
+        "  tokens show   <id>  Display a token value (with confirmation)\n\n"
+        "Examples:\n"
+        "  python -m llama_deploy\n"
+        "  python -m llama_deploy deploy --batch --bind 127.0.0.1 --port 8080\n"
+        "  python -m llama_deploy tokens list\n"
+        "  python -m llama_deploy tokens create --name my-app\n"
+        "  python -m llama_deploy tokens revoke tk_4f9a2b1c3d8e\n"
+    )
+
+
+def _run_deploy_wizard() -> None:
+    from llama_deploy.wizard import run_wizard
+    from llama_deploy.orchestrator import run_deploy
+    cfg = run_wizard()
+    run_deploy(cfg)
+
+
+def _dispatch_tokens(argv: List[str]) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m llama_deploy tokens",
+        description="Manage API tokens for the deployed llama-server.",
+    )
+    parser.add_argument("--base-dir", default="/opt/llama", metavar="DIR",
+                        help="Base directory used during deployment. (default: /opt/llama)")
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    sub.add_parser("list", help="List all tokens (including revoked).")
+
+    p_create = sub.add_parser("create", help="Create a new named token.")
+    p_create.add_argument("--name", required=True, metavar="NAME",
+                          help="Human-readable label for the token.")
+
+    p_revoke = sub.add_parser("revoke", help="Revoke a token by ID.")
+    p_revoke.add_argument("id", metavar="TOKEN_ID", help="The tk_... ID to revoke.")
+
+    p_show = sub.add_parser("show", help="Display a token's value (requires confirmation).")
+    p_show.add_argument("id", metavar="TOKEN_ID", help="The tk_... ID to show.")
+
+    args = parser.parse_args(argv)
+    base = Path(args.base_dir)
+
+    if args.action == "list":
+        _tokens_list(base)
+    elif args.action == "create":
+        _tokens_create(base, args.name)
+    elif args.action == "revoke":
+        _tokens_revoke(base, args.id)
+    elif args.action == "show":
+        _tokens_show(base, args.id)
