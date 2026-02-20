@@ -517,6 +517,7 @@ def run_deploy(cfg) -> None:
         ensure_docker_daemon_hardening,
         ensure_swap,
         ensure_firewall,
+        pick_free_bind_port,
         resolve_hashed_proxy_ports,
     )
     from llama_deploy.tokens import TokenStore
@@ -556,6 +557,27 @@ def run_deploy(cfg) -> None:
                 f"sidecar {cfg.sidecar_port}->{sidecar_port}"
             )
             cfg = replace(cfg, llama_internal_port=llama_port, sidecar_port=sidecar_port)
+
+    if cfg.enable_webui:
+        avoid_ports: Set[int] = {cfg.llama_internal_port, cfg.sidecar_port}
+        if cfg.network.publish:
+            avoid_ports.add(cfg.network.port)
+        webui_port = pick_free_bind_port(
+            cfg.webui_host,
+            cfg.webui_port,
+            avoid=avoid_ports,
+            purpose="Open WebUI",
+        )
+        if webui_port != cfg.webui_port:
+            tqdm.write(
+                "[AUTO] Open WebUI port adjusted to avoid conflicts: "
+                f"{cfg.webui_host}:{cfg.webui_port} -> {cfg.webui_host}:{webui_port}"
+            )
+            log_line(
+                "[AUTO] Open WebUI port adjusted: "
+                f"{cfg.webui_host}:{cfg.webui_port} -> {cfg.webui_host}:{webui_port}"
+            )
+            cfg = replace(cfg, webui_port=webui_port)
 
     tqdm.write(f"[INFO] Logging to: {LOG_PATH}")
     log_line(f"=== START {dt.datetime.now(dt.timezone.utc).isoformat()}Z ===")

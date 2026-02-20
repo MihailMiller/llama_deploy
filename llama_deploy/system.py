@@ -396,6 +396,51 @@ def _is_loopback_port_free(port: int) -> bool:
         sock.close()
 
 
+def _is_bind_port_free(bind_host: str, port: int) -> bool:
+    """
+    Return True when bind_host:port can be bound.
+    """
+    family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((bind_host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def pick_free_bind_port(
+    bind_host: str,
+    preferred: int,
+    *,
+    avoid: Optional[set] = None,
+    purpose: str = "service",
+) -> int:
+    """
+    Pick a free TCP port for bind_host, preferring the given value.
+    """
+    avoid = avoid or set()
+    if preferred not in avoid and _is_bind_port_free(bind_host, preferred):
+        return preferred
+
+    for candidate in range(preferred + 1, 65536):
+        if candidate in avoid:
+            continue
+        if _is_bind_port_free(bind_host, candidate):
+            return candidate
+
+    for candidate in range(1024, preferred):
+        if candidate in avoid:
+            continue
+        if _is_bind_port_free(bind_host, candidate):
+            return candidate
+
+    die(f"Could not find a free TCP port on {bind_host} for {purpose}.")
+
+
 def _pick_free_loopback_port(preferred: int, *, avoid: Optional[set] = None) -> int:
     """
     Pick a free 127.0.0.1 TCP port, preferring the given value.
