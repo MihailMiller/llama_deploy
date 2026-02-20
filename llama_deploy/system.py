@@ -11,6 +11,7 @@ import ipaddress
 import os
 import re
 import shutil
+import socket
 import subprocess
 from pathlib import Path
 from shlex import quote
@@ -378,6 +379,54 @@ def _fail_on_bridge_route_conflicts() -> None:
         "Fix: remove conflicting Docker bridge networks and retry "
         "(e.g. `docker network prune -f`, or targeted `docker network rm <name>`)."
     )
+
+
+def _is_loopback_port_free(port: int) -> bool:
+    """
+    Return True when 127.0.0.1:port can be bound.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _pick_free_loopback_port(preferred: int, *, avoid: Optional[set] = None) -> int:
+    """
+    Pick a free 127.0.0.1 TCP port, preferring the given value.
+    """
+    avoid = avoid or set()
+    if preferred not in avoid and _is_loopback_port_free(preferred):
+        return preferred
+
+    # Try close-by ports first so resulting values remain predictable.
+    candidates = list(range(preferred + 1, min(preferred + 2000, 65535)))
+    candidates.extend(range(10000, 65535))
+
+    for port in candidates:
+        if port in avoid:
+            continue
+        if _is_loopback_port_free(port):
+            return port
+
+    die("Could not find a free loopback TCP port for Docker/NGINX hashed mode.")
+
+
+def resolve_hashed_proxy_ports(
+    llama_preferred: int = 8081,
+    sidecar_preferred: int = 9000,
+) -> Tuple[int, int]:
+    """
+    Select free loopback ports for hashed mode llama upstream + auth sidecar.
+    """
+    llama_port = _pick_free_loopback_port(llama_preferred)
+    sidecar_port = _pick_free_loopback_port(sidecar_preferred, avoid={llama_port})
+    return llama_port, sidecar_port
 
 
 def ensure_docker_daemon_hardening() -> None:

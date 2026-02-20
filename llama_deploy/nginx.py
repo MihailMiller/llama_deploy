@@ -7,12 +7,12 @@ TLS only (--domain set, plaintext auth):
   Internet → NGINX (:443 HTTPS) → 127.0.0.1:port (llama-server)
 
 Hashed auth, no domain (local only):
-  Client → NGINX (:port, loopback) → auth_request → sidecar (:9000)
-                                   → 127.0.0.1:8081 (llama-server internal)
+  Client → NGINX (:port, loopback) → auth_request → sidecar (:sidecar_port)
+                                   → 127.0.0.1:upstream_port (llama-server)
 
 Hashed auth + TLS (--domain set, --auth-mode hashed):
-  Internet → NGINX (:443 HTTPS) → auth_request → sidecar (:9000)
-                                → 127.0.0.1:8081 (llama-server internal)
+  Internet → NGINX (:443 HTTPS) → auth_request → sidecar (:sidecar_port)
+                                → 127.0.0.1:upstream_port (llama-server)
 
 Public entry points
 -------------------
@@ -301,6 +301,12 @@ def ensure_tls_for_domain(
     4. Run certbot --nginx (adds SSL block + HTTP→HTTPS redirect)
     """
     from tqdm import tqdm
+    from llama_deploy.config import is_valid_domain, normalize_domain
+
+    domain = normalize_domain(domain) or ""
+    if not is_valid_domain(domain):
+        from llama_deploy.log import die
+        die("Invalid domain for TLS setup. Use a bare hostname like api.example.com.")
 
     tqdm.write(f"[TLS] Setting up NGINX + Let's Encrypt for {domain}")
     log_line(f"[TLS] domain={domain} upstream_port={upstream_port} auth_sidecar={use_auth_sidecar}")

@@ -40,8 +40,10 @@ from llama_deploy.config import (
     BackendKind,
     Config,
     DockerNetworkMode,
+    is_valid_domain,
     ModelSpec,
     NetworkConfig,
+    normalize_domain,
 )
 
 _DEFAULT_LLM_CANDIDATES = "Q4_K_M,Q5_K_M,Q4_0,Q3_K_M"
@@ -186,15 +188,18 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
             profile = AccessProfile.LOCALHOST
 
     # Cross-argument validation
+    domain = normalize_domain(raw.domain)
+    if domain and not is_valid_domain(domain):
+        parser.error("--domain must be a bare hostname like api.example.com (no http://, path, or port).")
     if bind_host == "0.0.0.0" and raw.no_publish:
         parser.error("--bind 0.0.0.0 cannot be combined with --no-publish.")
     if raw.open_firewall and bind_host != "0.0.0.0":
         parser.error("--open-firewall requires --bind 0.0.0.0.")
-    if raw.domain and bind_host != "127.0.0.1":
+    if domain and bind_host != "127.0.0.1":
         parser.error("--domain requires --bind 127.0.0.1 (NGINX proxies to loopback).")
-    if raw.domain and not raw.certbot_email:
+    if domain and not raw.certbot_email:
         parser.error("--certbot-email is required when --domain is set.")
-    if raw.certbot_email and not raw.domain:
+    if raw.certbot_email and not domain:
         parser.error("--certbot-email has no effect without --domain.")
     if profile == AccessProfile.HOME_PRIVATE and not raw.lan_cidr:
         parser.error("--profile=home-private requires --lan-cidr (e.g. 192.168.1.0/24).")
@@ -248,7 +253,7 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
         emb=emb_spec,
         auto_optimize=not raw.no_auto_optimize,
         allow_unverified_downloads=raw.allow_unverified_downloads,
-        domain=raw.domain or None,
+        domain=domain,
         certbot_email=raw.certbot_email or None,
         auth_mode=AuthMode(raw.auth_mode),
         tailscale_authkey=tailscale_authkey,

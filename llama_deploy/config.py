@@ -66,6 +66,44 @@ class DockerNetworkMode(str, Enum):
     HOST = "host"
 
 
+_DOMAIN_LABEL_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+
+def normalize_domain(raw: Optional[str]) -> Optional[str]:
+    """
+    Normalize a user-provided domain-ish value to a bare hostname.
+
+    Examples:
+      "https://api.example.com/path" -> "api.example.com"
+      "api.example.com:443"          -> "api.example.com"
+    """
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if not value:
+        return None
+    value = re.sub(r"^https?://", "", value)
+    value = value.split("/", 1)[0]
+    value = value.split("?", 1)[0]
+    value = value.split("#", 1)[0]
+    if ":" in value:
+        value = value.split(":", 1)[0]
+    value = value.strip(".")
+    return value or None
+
+
+def is_valid_domain(domain: str) -> bool:
+    """
+    Return True for DNS-style FQDN hostnames (no scheme, no path, no port).
+    """
+    if not domain or "." not in domain:
+        return False
+    if len(domain) > 253:
+        return False
+    labels = domain.split(".")
+    return all(_DOMAIN_LABEL_RE.fullmatch(label) for label in labels)
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """
@@ -259,8 +297,17 @@ class Config:
     auth_mode: AuthMode = AuthMode.PLAINTEXT  # token storage strategy
     tailscale_authkey: Optional[str] = None   # auth key for non-interactive tailscale up (vpn-only profile)
     docker_network_mode: DockerNetworkMode = DockerNetworkMode.BRIDGE  # Docker network mode for containers
+    llama_internal_port: int = 8081  # host loopback port for llama-server in hashed mode
+    sidecar_port: int = 9000         # host loopback port for auth sidecar in hashed mode
 
     def __post_init__(self) -> None:
+        normalized_domain = normalize_domain(self.domain)
+        object.__setattr__(self, "domain", normalized_domain)
+        if normalized_domain and not is_valid_domain(normalized_domain):
+            raise ValueError(
+                f"domain={self.domain!r} is invalid. Use a bare hostname like api.example.com."
+            )
+
         if self.docker_network_mode == DockerNetworkMode.HOST:
             if not self.network.publish:
                 raise ValueError(
@@ -270,17 +317,14 @@ class Config:
                 raise ValueError(
                     "docker_network_mode=host is not supported with --auth-mode hashed."
                 )
-
-    # Internal ports used in hashed mode (not user-configurable)
-    @property
-    def llama_internal_port(self) -> int:
-        """Port llama-server is published on when NGINX fronts it (hashed mode)."""
-        return 8081
-
-    @property
-    def sidecar_port(self) -> int:
-        """Port the auth sidecar listens on (always loopback)."""
-        return 9000
+        for name, port in (
+            ("llama_internal_port", self.llama_internal_port),
+            ("sidecar_port", self.sidecar_port),
+        ):
+            if not (1024 <= int(port) <= 65535):
+                raise ValueError(f"{name}={port} must be between 1024 and 65535.")
+        if self.llama_internal_port == self.sidecar_port:
+            raise ValueError("llama_internal_port and sidecar_port must be different.")
 
     @property
     def use_tls(self) -> bool:

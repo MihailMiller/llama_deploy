@@ -245,6 +245,7 @@ HTTPS / TLS (NGINX + Let's Encrypt):
                         Installs NGINX as a TLS-terminating reverse proxy and
                         runs certbot to obtain a Let's Encrypt certificate.
                         The Docker port stays on loopback; NGINX faces the internet.
+                        Use a bare hostname only (no http://, path, or port).
                         DNS A record for DOMAIN must already point to this host.
   --certbot-email EMAIL Email for Let's Encrypt renewal notices.
                         Required when --domain is set.
@@ -671,8 +672,12 @@ Client → Bearer sk-abc123
   → NGINX auth_request /auth
     → llama-auth sidecar:
         SHA-256("sk-abc123") == hash in token_hashes.json?  → 200 / 401
-  → if 200: proxy to llama-server (127.0.0.1:8081, no --api-key-file)
+  → if 200: proxy to llama-server (127.0.0.1:<auto-selected-port>, no --api-key-file)
 ```
+
+By default, hashed mode prefers loopback ports `8081` (llama) and `9000` (sidecar).
+If either port is already in use, deployment now auto-selects free loopback ports
+and writes the same values into both Docker Compose and NGINX.
 
 Only the SHA-256 hash is stored. The plaintext value is shown once at creation and never written to disk. Revocation removes the hash from `token_hashes.json` and takes effect on the next request — no container restart needed. The trade-off is that NGINX and the auth sidecar are required.
 
@@ -798,6 +803,11 @@ docker network inspect <network_name>
 docker network rm <network_name>
 ```
 During deploy, a preflight check now aborts early when Docker bridge subnets overlap host routes so the failure is explicit.
+
+**`Bind for 127.0.0.1:8081 failed: port is already allocated`.**
+In hashed mode, `llama_deploy` now auto-selects free loopback ports for the internal
+llama upstream and auth sidecar, and configures matching NGINX upstream/auth ports.
+Re-run deploy to regenerate `docker-compose.yml` and NGINX config with free ports.
 
 **Download fails or SHA-256 mismatch.**
 In the interactive wizard flow, deployment now offers a retry loop: you can switch to another preset model (or enter a custom repo/pattern) and retry until one succeeds. In batch mode (non-interactive), retries are not prompted; set model flags explicitly or rerun with a different model repo.

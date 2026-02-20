@@ -30,8 +30,10 @@ from llama_deploy.config import (
     BackendKind,
     Config,
     DockerNetworkMode,
+    is_valid_domain,
     ModelSpec,
     NetworkConfig,
+    normalize_domain,
 )
 
 # ---------------------------------------------------------------------------
@@ -346,10 +348,13 @@ def _step_network() -> Tuple[NetworkConfig, Optional[str], Optional[str]]:
             _info("NGINX will listen on :80 and :443 and proxy to the loopback port.")
             _info("Make sure your domain's DNS A record already points to this server.")
             print()
-            while not domain or "." not in domain:
-                domain = _prompt("Domain name (e.g. api.example.com)")
-                if not domain or "." not in domain:
-                    print(_red("  Please enter a valid domain name."))
+            while not domain:
+                entered = _prompt("Domain name (e.g. api.example.com)")
+                normalized = normalize_domain(entered)
+                if normalized and is_valid_domain(normalized):
+                    domain = normalized
+                else:
+                    print(_red("  Please enter a valid domain (no http://, path, or port)."))
             while not certbot_email or "@" not in certbot_email:
                 certbot_email = _prompt("Email for Let's Encrypt renewal notices")
                 if not certbot_email or "@" not in certbot_email:

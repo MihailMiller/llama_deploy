@@ -487,7 +487,7 @@ def run_deploy(cfg) -> None:
     Called by both wizard mode (cli._run_deploy_wizard) and batch mode
     (cli.dispatch with --batch flag).
     """
-    from llama_deploy.config import AuthMode
+    from llama_deploy.config import AuthMode, DockerNetworkMode
     from llama_deploy.system import (
         require_root_reexec,
         detect_ubuntu,
@@ -497,6 +497,7 @@ def run_deploy(cfg) -> None:
         ensure_docker_daemon_hardening,
         ensure_swap,
         ensure_firewall,
+        resolve_hashed_proxy_ports,
     )
     from llama_deploy.tokens import TokenStore
     from llama_deploy.service import (
@@ -517,6 +518,24 @@ def run_deploy(cfg) -> None:
         cfg = _auto_optimize_cfg(cfg)
     else:
         tqdm.write("[AUTO] Host-spec auto optimization disabled by config.")
+
+    if cfg.auth_mode == AuthMode.HASHED and cfg.docker_network_mode != DockerNetworkMode.HOST:
+        llama_port, sidecar_port = resolve_hashed_proxy_ports(
+            cfg.llama_internal_port,
+            cfg.sidecar_port,
+        )
+        if llama_port != cfg.llama_internal_port or sidecar_port != cfg.sidecar_port:
+            tqdm.write(
+                "[AUTO] Hashed mode ports adjusted to avoid conflicts: "
+                f"llama {cfg.llama_internal_port}->{llama_port}, "
+                f"sidecar {cfg.sidecar_port}->{sidecar_port}"
+            )
+            log_line(
+                "[AUTO] hashed ports adjusted: "
+                f"llama {cfg.llama_internal_port}->{llama_port}, "
+                f"sidecar {cfg.sidecar_port}->{sidecar_port}"
+            )
+            cfg = replace(cfg, llama_internal_port=llama_port, sidecar_port=sidecar_port)
 
     tqdm.write(f"[INFO] Logging to: {LOG_PATH}")
     log_line(f"=== START {dt.datetime.now(dt.timezone.utc).isoformat()}Z ===")

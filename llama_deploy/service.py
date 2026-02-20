@@ -11,10 +11,11 @@ Two compose layouts are generated depending on cfg.auth_mode:
     --api-key-file /run/secrets/api_keys passed to llama-server
 
   Hashed mode:
-    llama-server published at 127.0.0.1:8081:8080 (NGINX-internal port)
+    llama-server published at 127.0.0.1:<llama_internal_port>:8080
     --api-key-file removed from llama-server command
-    llama-auth sidecar added (python:3.12-slim, published at 127.0.0.1:9000:9000)
-    NGINX (on host) does auth_request to 127.0.0.1:9000 before proxying to 8081
+    llama-auth sidecar added (python:3.12-slim, 127.0.0.1:<sidecar_port>:9000)
+    NGINX (on host) does auth_request to 127.0.0.1:<sidecar_port>
+    before proxying to <llama_internal_port>
 """
 
 from __future__ import annotations
@@ -247,8 +248,10 @@ def _write_compose_hashed(compose_path: Path, cfg: Config) -> None:
     Hashed mode: llama-server has no --api-key-file; auth is delegated to
     the llama-auth sidecar via NGINX auth_request.
 
-    llama-server is published on 127.0.0.1:8081 (internal; NGINX proxies to it).
-    The auth sidecar is published on 127.0.0.1:9000 (NGINX auth_request target).
+    llama-server is published on 127.0.0.1:<llama_internal_port>
+    (internal; NGINX proxies to it).
+    The auth sidecar is published on 127.0.0.1:<sidecar_port>
+    (NGINX auth_request target).
     """
     internal_port = cfg.llama_internal_port
     sidecar_port  = cfg.sidecar_port
