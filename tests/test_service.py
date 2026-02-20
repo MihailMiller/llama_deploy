@@ -1,9 +1,17 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from llama_deploy.config import BackendKind, Config, ModelSpec, NetworkConfig
+from llama_deploy.config import (
+    AuthMode,
+    BackendKind,
+    Config,
+    DockerNetworkMode,
+    ModelSpec,
+    NetworkConfig,
+)
 from llama_deploy.service import write_compose, write_models_ini
 
 
@@ -121,6 +129,44 @@ class ServiceModelsIniTests(unittest.TestCase):
 
             self.assertIn("--models-preset /presets/models.ini", content)
             self.assertNotIn("--models-dir /models", content)
+
+    def test_bridge_mode_webui_does_not_require_compose_network(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base_dir = Path(td)
+            compose_path = base_dir / "docker-compose.yml"
+            cfg = replace(
+                _cfg(base_dir),
+                auth_mode=AuthMode.HASHED,
+                enable_webui=True,
+                docker_network_mode=DockerNetworkMode.BRIDGE,
+            )
+
+            with mock.patch("llama_deploy.system.log_line"):
+                write_compose(compose_path, cfg)
+            content = compose_path.read_text(encoding="utf-8")
+
+            self.assertIn("open-webui:", content)
+            self.assertIn("network_mode: bridge", content)
+            self.assertIn("links:", content)
+            self.assertIn("- llama", content)
+
+    def test_compose_mode_webui_omits_bridge_specific_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base_dir = Path(td)
+            compose_path = base_dir / "docker-compose.yml"
+            cfg = replace(
+                _cfg(base_dir),
+                auth_mode=AuthMode.HASHED,
+                enable_webui=True,
+                docker_network_mode=DockerNetworkMode.COMPOSE,
+            )
+
+            with mock.patch("llama_deploy.system.log_line"):
+                write_compose(compose_path, cfg)
+            content = compose_path.read_text(encoding="utf-8")
+
+            self.assertIn("open-webui:", content)
+            self.assertNotIn("links:", content)
 
 
 if __name__ == "__main__":

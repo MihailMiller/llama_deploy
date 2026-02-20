@@ -298,13 +298,23 @@ def _write_compose_hashed(compose_path: Path, cfg: Config) -> None:
     if cfg.enable_webui:
         webui_secret = _load_or_create_webui_secret(cfg.base_dir)
         emb_alias = cfg.emb.effective_alias
+        webui_network_mode_block = ""
+        webui_links_block = ""
+        if cfg.docker_network_mode == DockerNetworkMode.BRIDGE:
+            # Keep bridge-mode deployments fully off Compose-managed networks.
+            webui_network_mode_block = "    network_mode: bridge\n"
+            # Legacy bridge needs an explicit link for stable name resolution.
+            webui_links_block = "    links:\n      - llama\n"
         webui_block = f"""
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
     restart: unless-stopped
+{webui_network_mode_block}
     ports:
       - "{cfg.webui_host}:{cfg.webui_port}:8080"
+{webui_links_block}    depends_on:
+      - llama
     volumes:
       - {cfg.base_dir}/webui:/app/backend/data
     environment:
@@ -319,8 +329,6 @@ def _write_compose_hashed(compose_path: Path, cfg: Config) -> None:
       # Disable built-in Ollama connection attempt
       - ENABLE_OLLAMA_API=false
       - WEBUI_SECRET_KEY={webui_secret}
-    depends_on:
-      - llama
 """
 
     content = f"""services:
