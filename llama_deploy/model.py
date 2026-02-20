@@ -284,11 +284,20 @@ def download_hf_file(
 
     got_sha = h.hexdigest()
     if expected_sha256 and got_sha.lower() != expected_sha256.lower():
-        die(
-            f"SHA256 mismatch for {dst.name}\n"
-            f"Expected: {expected_sha256}\n"
-            f"Got:      {got_sha}"
-        )
+        _, probe_sha = probe_hf_resolve_metadata(repo, revision, filename, hf_token)
+        if probe_sha and got_sha.lower() == probe_sha.lower():
+            tqdm.write(
+                f"[WARN] Expected sha256 ({expected_sha256[:12]}...) mismatched, "
+                f"but resolve header sha256 matches downloaded file ({probe_sha[:12]}...). "
+                f"Accepting pinned file."
+            )
+            expected_sha256 = probe_sha
+        else:
+            die(
+                f"SHA256 mismatch for {dst.name}\n"
+                f"Expected: {expected_sha256}\n"
+                f"Got:      {got_sha}"
+            )
 
     import os
     part.replace(dst)
@@ -325,10 +334,21 @@ def resolve_model(spec: ModelSpec, dst_dir: Path, hf_token: Optional[str]) -> Mo
         meta = hf_model_metadata(repo, hf_token)
         revision = str(meta.get("sha") or "main")
         filename, size, sha256 = pick_hf_file(meta, pick_spec)
-        if size is None or sha256 is None:
-            probed_size, probed_sha = probe_hf_resolve_metadata(repo, revision, filename, hf_token)
-            size = size if size is not None else probed_size
-            sha256 = sha256 if sha256 is not None else probed_sha
+        probed_size, probed_sha = probe_hf_resolve_metadata(repo, revision, filename, hf_token)
+        if probed_size is not None:
+            if size is not None and size != probed_size:
+                tqdm.write(
+                    f"[WARN] HF API size ({size}) disagrees with resolve header ({probed_size}); "
+                    f"using resolve header."
+                )
+            size = probed_size
+        if probed_sha is not None:
+            if sha256 is not None and sha256.lower() != probed_sha.lower():
+                tqdm.write(
+                    f"[WARN] HF API sha256 ({sha256[:12]}...) disagrees with resolve header "
+                    f"({probed_sha[:12]}...); using resolve header."
+                )
+            sha256 = probed_sha
         return filename, size, sha256, revision
 
     resolved_repo = spec.hf_repo
