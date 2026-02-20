@@ -31,9 +31,10 @@ LLM-specific proxy settings
 from __future__ import annotations
 
 from pathlib import Path
+import socket
 from shlex import quote
 
-from llama_deploy.log import log_line, sh
+from llama_deploy.log import die, log_line, sh
 
 
 _SITES_AVAILABLE = Path("/etc/nginx/sites-available")
@@ -68,6 +69,44 @@ def ensure_nginx() -> None:
 def _config_name(domain_or_host: str) -> str:
     """Filesystem-safe config name derived from a domain or bind address."""
     return domain_or_host.replace(".", "_").replace("-", "_").replace(":", "_")
+
+
+def _is_bind_port_free(bind_host: str, port: int) -> bool:
+    """
+    Return True if bind_host:port can be bound right now.
+    """
+    family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.bind((bind_host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _pick_free_bind_port(bind_host: str, preferred: int, *, avoid: set[int] | None = None) -> int:
+    """
+    Pick a free TCP port for the given bind host, preferring the requested one.
+    """
+    avoid = avoid or set()
+    if preferred not in avoid and _is_bind_port_free(bind_host, preferred):
+        return preferred
+
+    for candidate in range(preferred + 1, 65536):
+        if candidate in avoid:
+            continue
+        if _is_bind_port_free(bind_host, candidate):
+            return candidate
+
+    for candidate in range(1024, preferred):
+        if candidate in avoid:
+            continue
+        if _is_bind_port_free(bind_host, candidate):
+            return candidate
+
+    die(f"Could not find a free TCP port on {bind_host} for local NGINX proxy.")
 
 
 def _auth_request_block() -> str:
@@ -335,29 +374,50 @@ def ensure_local_proxy(
     *,
     use_auth_sidecar: bool = False,
     sidecar_port: int = 9000,
-) -> None:
+) -> int:
     """
     Set up NGINX as a local (non-TLS) reverse proxy for hashed auth mode
     when no domain is configured.
 
     NGINX listens on bind_host:port and proxies to llama-server on upstream_port.
     The auth_request directive delegates token verification to the sidecar.
+
+    Returns the actual proxy port that was configured.
     """
     from tqdm import tqdm
 
-    tqdm.write(f"[NGINX] Setting up local auth proxy on {bind_host}:{port}")
-    log_line(f"[NGINX] local proxy bind={bind_host}:{port} upstream=127.0.0.1:{upstream_port}")
+    requested_port = port
+    site_name = f"llama_local_{requested_port}"
+    has_existing_site = (
+        (_SITES_ENABLED / site_name).exists()
+        or (_SITES_ENABLED / site_name).is_symlink()
+    )
+    selected_port = requested_port if has_existing_site else _pick_free_bind_port(bind_host, requested_port)
+
+    if selected_port != requested_port:
+        tqdm.write(
+            f"[NGINX] Requested local proxy port {requested_port} is busy; "
+            f"using {selected_port}."
+        )
+        log_line(
+            f"[NGINX] local proxy port adjusted: "
+            f"{bind_host}:{requested_port} -> {bind_host}:{selected_port}"
+        )
+
+    tqdm.write(f"[NGINX] Setting up local auth proxy on {bind_host}:{selected_port}")
+    log_line(f"[NGINX] local proxy bind={bind_host}:{selected_port} upstream=127.0.0.1:{upstream_port}")
 
     ensure_nginx()
     write_nginx_local_config(
-        bind_host, port, upstream_port,
+        bind_host, selected_port, upstream_port,
         use_auth_sidecar=use_auth_sidecar,
         sidecar_port=sidecar_port,
     )
 
     if configure_ufw and bind_host == "0.0.0.0":
-        sh(f"ufw allow {port}/tcp", check=False)
+        sh(f"ufw allow {selected_port}/tcp", check=False)
         sh("ufw status verbose", check=False)
 
-    tqdm.write(f"[NGINX] Local proxy ready: http://{bind_host}:{port}/v1")
-    log_line(f"[NGINX] http://{bind_host}:{port}/v1 active")
+    tqdm.write(f"[NGINX] Local proxy ready: http://{bind_host}:{selected_port}/v1")
+    log_line(f"[NGINX] http://{bind_host}:{selected_port}/v1 active")
+    return selected_port

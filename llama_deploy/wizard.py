@@ -20,6 +20,8 @@ cli.build_config() directly.
 
 from __future__ import annotations
 
+from dataclasses import replace
+import socket
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -277,6 +279,55 @@ def _detect_lan_cidr() -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _is_bind_port_free(bind_host: str, port: int) -> bool:
+    """
+    Return True when bind_host:port can be bound right now.
+    """
+    family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.bind((bind_host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _commit_local_hashed_proxy_port(
+    network: NetworkConfig,
+    auth_mode: AuthMode,
+    domain: Optional[str],
+) -> NetworkConfig:
+    """
+    In wizard mode, ask the user to explicitly commit to a local proxy port
+    for hashed auth without TLS.
+    """
+    if auth_mode != AuthMode.HASHED or domain or not network.publish:
+        return network
+
+    print()
+    _section("Local proxy port")
+    _info("Hashed mode without a domain uses an NGINX local auth proxy.")
+    _info("Choose and commit to the proxy port now.")
+
+    chosen = network.port
+    while True:
+        if _is_bind_port_free(network.bind_host, chosen):
+            if _confirm(f"Commit to local proxy port {chosen}?", default=True):
+                return replace(network, port=chosen)
+        else:
+            _warn(f"Port {chosen} on {network.bind_host} is currently in use.")
+
+        default_next = 8080 if chosen >= 65535 else chosen + 1
+        chosen = _prompt_int(
+            "Choose local proxy port",
+            default=default_next,
+            min_val=1024,
+            max_val=65535,
+        )
 
 
 def _step_network() -> Tuple[NetworkConfig, Optional[str], Optional[str]]:
@@ -546,6 +597,7 @@ def run_wizard() -> Config:
     llm_spec, emb_spec  = _step_models()
     network, domain, certbot_email = _step_network()
     token_name, auth_mode = _step_token()
+    network = _commit_local_hashed_proxy_port(network, auth_mode, domain)
     swap_gib, base_dir_str, tailscale_authkey, docker_network_mode = _step_system(network, auth_mode)
 
     from pathlib import Path

@@ -666,8 +666,9 @@ def run_deploy(cfg) -> None:
     # Both steps are mutually exclusive via skip_if.
 
     def _setup_local_proxy() -> None:
+        nonlocal cfg
         from llama_deploy.nginx import ensure_local_proxy
-        ensure_local_proxy(
+        selected_port = ensure_local_proxy(
             bind_host=cfg.network.bind_host,
             port=cfg.network.port,
             upstream_port=cfg.llama_internal_port,
@@ -675,6 +676,17 @@ def run_deploy(cfg) -> None:
             use_auth_sidecar=True,
             sidecar_port=cfg.sidecar_port,
         )
+        if selected_port != cfg.network.port:
+            old_port = cfg.network.port
+            cfg = replace(cfg, network=replace(cfg.network, port=selected_port))
+            tqdm.write(
+                f"[AUTO] Local proxy port adjusted: "
+                f"{cfg.network.bind_host}:{old_port} -> {cfg.network.bind_host}:{selected_port}"
+            )
+            log_line(
+                f"[AUTO] local proxy port adjusted: "
+                f"{cfg.network.bind_host}:{old_port} -> {cfg.network.bind_host}:{selected_port}"
+            )
 
     local_proxy_step = Step(
         label="NGINX local auth proxy (hashed mode)",
@@ -707,16 +719,17 @@ def run_deploy(cfg) -> None:
     # Phase 4: Validation
     # -----------------------------------------------------------------------
     # Health check against the loopback port (always reachable, regardless of TLS)
-    loopback_url = cfg.network.base_url
+    def _loopback_url() -> str:
+        return cfg.network.base_url
 
     if cfg.network.publish or cfg.auth_mode == AuthMode.HASHED:
         health_step = Step(
             "Wait for /health",
-            lambda: wait_health(f"{loopback_url}/health", timeout_s=300),
+            lambda: wait_health(f"{_loopback_url()}/health", timeout_s=300),
         )
         smoke_step = Step(
             "Smoke tests (OpenAI-compatible routes)",
-            lambda: curl_smoke_tests(loopback_url, token_step.result.value, llm_step.result, emb_step.result),
+            lambda: curl_smoke_tests(_loopback_url(), token_step.result.value, llm_step.result, emb_step.result),
         )
     else:
         def _internal_test() -> None:

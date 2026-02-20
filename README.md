@@ -857,3 +857,8 @@ docker compose -f /opt/llama/docker-compose.yml ps
 docker logs llama-router
 ```
 
+**NGINX returns 500 in local hashed mode.**
+`llama_deploy` now keeps existing NGINX sites untouched and auto-selects a free
+local proxy port when the requested one is already in use. Re-run deploy so
+`docker-compose.yml` and NGINX are regenerated with matching ports.
+
