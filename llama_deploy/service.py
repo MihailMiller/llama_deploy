@@ -212,12 +212,6 @@ def _write_compose_plaintext(compose_path: Path, cfg: Config) -> None:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
-
-    networks:
-      - appnet
-
-networks:
-  appnet: {{}}
 """
     write_file(compose_path, content, mode=0o644)
 
@@ -265,9 +259,6 @@ def _write_compose_hashed(compose_path: Path, cfg: Config) -> None:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
 
-    networks:
-      - appnet
-
   llama-auth:
     image: python:3.12-slim
     container_name: llama-auth
@@ -294,12 +285,6 @@ def _write_compose_hashed(compose_path: Path, cfg: Config) -> None:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
-
-    networks:
-      - appnet
-
-networks:
-  appnet: {{}}
 """
     write_file(compose_path, content, mode=0o644)
 

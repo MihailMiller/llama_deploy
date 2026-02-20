@@ -701,7 +701,7 @@ def run_deploy(cfg) -> None:
         )
     else:
         project  = cfg.base_dir.name
-        net_name = f"{project}_appnet"
+        net_name = f"{project}_default"
 
         def _internal_test() -> None:
             from llama_deploy.log import sh
