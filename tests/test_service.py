@@ -64,7 +64,8 @@ class ServiceModelsIniTests(unittest.TestCase):
             content = preset_path.read_text(encoding="utf-8")
 
             self.assertIn("[*]", content)
-            self.assertIn("load-on-startup = false", content)
+            self.assertIn("load-on-startup = 0", content)
+            self.assertNotIn("version = 1", content)
             self.assertIn(f"[{llm.effective_alias}]", content)
             self.assertIn(f"[{emb.effective_alias}]", content)
             self.assertIn("model = /models/phi.gguf", content)
@@ -72,11 +73,11 @@ class ServiceModelsIniTests(unittest.TestCase):
 
             # With models_max=1, neither model family is preloaded at startup.
             self.assertIn(
-                f"[{llm.effective_alias}]\nmodel = /models/phi.gguf\nload-on-startup = false",
+                f"[{llm.effective_alias}]\nmodel = /models/phi.gguf\nload-on-startup = 0",
                 content,
             )
             self.assertIn(
-                f"[{emb.effective_alias}]\nmodel = /models/emb.gguf\nload-on-startup = false",
+                f"[{emb.effective_alias}]\nmodel = /models/emb.gguf\nload-on-startup = 0",
                 content,
             )
 
@@ -105,7 +106,7 @@ class ServiceModelsIniTests(unittest.TestCase):
                 write_models_ini(preset_path, llm, emb, parallel=2, models_max=2)
             content = preset_path.read_text(encoding="utf-8")
             self.assertIn(
-                f"[{emb.effective_alias}]\nmodel = /models/emb.gguf\nload-on-startup = true",
+                f"[{emb.effective_alias}]\nmodel = /models/emb.gguf\nload-on-startup = 1",
                 content,
             )
 

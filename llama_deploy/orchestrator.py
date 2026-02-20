@@ -308,7 +308,7 @@ def _auto_optimize_cfg(cfg):
     --------
     - Detect RAM and CPU core count.
     - Downshift the default LLM on low-memory hosts.
-    - Clamp ctx / models_max / swap for safer startup on constrained systems.
+    - Clamp ctx / swap for safer startup on constrained systems.
     - Keep explicit custom --llm-repo choices intact (unless they match default).
 
     Override rules
@@ -341,9 +341,12 @@ def _auto_optimize_cfg(cfg):
         log_line(f"[AUTO-SKIP] {msg}")
 
     # ---- models_max --------------------------------------------------------
-    if mem_gib < 16 and tuned.models_max > 1:
-        _log_change(f"models_max: {tuned.models_max} -> 1  (RAM {mem_gib:.1f} GiB < 16 GiB)")
-        tuned = replace(tuned, models_max=1)
+    # Keep at least 2 because this deployment always configures one LLM preset
+    # and one embedding preset. Lowering to 1 leads to startup model-count
+    # failures in some llama-server builds.
+    if tuned.models_max < 2:
+        _log_change(f"models_max: {tuned.models_max} -> 2  (requires LLM + embedding presets)")
+        tuned = replace(tuned, models_max=2)
 
     # ---- swap --------------------------------------------------------------
     if mem_gib < 8:
