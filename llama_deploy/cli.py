@@ -117,8 +117,8 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
                    help="HuggingFace access token. Falls back to HF_TOKEN env var.")
 
     g = parser.add_argument_group("Models")
-    g.add_argument("--llm-repo", default="unsloth/Ministral-3-14B-Instruct-2512-GGUF", metavar="REPO",
-                   help="HuggingFace repo for the LLM GGUF. (default: unsloth/Ministral-3-14B-Instruct-2512-GGUF)")
+    g.add_argument("--llm-repo", default="Qwen/Qwen3-8B-GGUF", metavar="REPO",
+                   help="HuggingFace repo for the LLM GGUF. (default: Qwen/Qwen3-8B-GGUF)")
     g.add_argument("--llm-candidates", default=_DEFAULT_LLM_CANDIDATES, metavar="PATTERNS",
                    help=f"Comma-separated GGUF filename patterns for LLM. (default: {_DEFAULT_LLM_CANDIDATES})")
     g.add_argument("--emb-repo", default="Qwen/Qwen3-Embedding-0.6B-GGUF", metavar="REPO",
@@ -144,8 +144,8 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
     g = parser.add_argument_group("Server tuning")
     g.add_argument("--models-max", type=int, default=2, metavar="N",
                    help="Router: max simultaneously loaded models. (default: 2)")
-    g.add_argument("--ctx-llm", type=int, default=4096, metavar="TOKENS",
-                   help="Context window for the LLM. (default: 4096)")
+    g.add_argument("--ctx-llm", type=int, default=3072, metavar="TOKENS",
+                   help="Context window for the LLM. (default: 3072)")
     g.add_argument("--ctx-emb", type=int, default=2048, metavar="TOKENS",
                    help="Context window for the embedding model. (default: 2048)")
     g.add_argument("--parallel", type=int, default=1, metavar="N",

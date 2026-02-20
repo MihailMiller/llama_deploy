@@ -19,12 +19,11 @@ Two compose layouts are generated depending on cfg.auth_mode:
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from shlex import quote
 
 from llama_deploy.config import AccessProfile, AuthMode, Config, ModelSpec
-from llama_deploy.log import log_line, sh
+from llama_deploy.log import sh
 from llama_deploy.system import write_file
 
 
@@ -314,18 +313,8 @@ def docker_pull(image: str) -> None:
 
 
 def docker_compose_up(compose_path: Path) -> None:
-    log_line(f"\n$ cd {compose_path.parent} && docker compose up -d")
-    subprocess.run(
-        ["docker", "compose", "up", "-d"],
-        cwd=compose_path.parent,
-        check=True,
-    )
+    sh(f"cd {quote(str(compose_path.parent))} && docker compose up -d")
 
 
 def docker_compose_down(compose_path: Path) -> None:
-    log_line(f"\n$ cd {compose_path.parent} && docker compose down")
-    subprocess.run(
-        ["docker", "compose", "down"],
-        cwd=compose_path.parent,
-        check=False,
-    )
+    sh(f"cd {quote(str(compose_path.parent))} && docker compose down", check=False)

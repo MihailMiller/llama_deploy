@@ -145,7 +145,8 @@ class TokenRuntime:
 
 
 _LLM_RETRY_PRESETS: List[Tuple[str, str, List[str]]] = [
-    ("Ministral-3-14B-Instruct-2512 (default)", "unsloth/Ministral-3-14B-Instruct-2512-GGUF", ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]),
+    ("Qwen3-8B (default)", "Qwen/Qwen3-8B-GGUF", ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]),
+    ("Ministral-3-14B-Instruct-2512", "unsloth/Ministral-3-14B-Instruct-2512-GGUF", ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]),
     ("Qwen3-14B", "Qwen/Qwen3-14B-GGUF", ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]),
     ("Llama 3.1 8B Instruct", "bartowski/Llama-3.1-8B-Instruct-GGUF", ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]),
     ("Mistral 7B Instruct v0.3", "bartowski/Mistral-7B-Instruct-v0.3-GGUF", ["Q4_K_M", "Q5_K_M", "Q4_0"]),
@@ -161,7 +162,7 @@ _EMB_RETRY_PRESETS: List[Tuple[str, str, List[str]]] = [
     ("BGE small EN v1.5", "lmstudio-community/bge-small-en-v1.5-GGUF", ["Q8_0", "F16", "Q6_K", "Q4_K_M"]),
 ]
 
-_DEFAULT_LLM_REPO = "unsloth/Ministral-3-14B-Instruct-2512-GGUF"
+_DEFAULT_LLM_REPO = "Qwen/Qwen3-8B-GGUF"
 _DEFAULT_LLM_PATTERNS = ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]
 _MID_LLM_REPO = "Qwen/Qwen3-8B-GGUF"
 _MID_LLM_PATTERNS = ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]
@@ -306,7 +307,7 @@ def _auto_optimize_cfg(cfg):
     Strategy
     --------
     - Detect RAM and CPU core count.
-    - Downshift default heavy LLM on low-memory hosts.
+    - Downshift the default LLM on low-memory hosts.
     - Clamp ctx / models_max / swap for safer startup on constrained systems.
     - Keep explicit custom --llm-repo choices intact (unless they match default).
 
@@ -357,7 +358,7 @@ def _auto_optimize_cfg(cfg):
         tuned = replace(tuned, swap_gib=rec_swap)
 
     # ---- LLM repo / ctx  ---------------------------------------------------
-    # Only auto-switch when the user is running the default heavy model.
+    # Only auto-switch when the user is running the default LLM.
     using_default_llm = (
         tuned.llm.hf_repo == _DEFAULT_LLM_REPO
         and tuned.llm.candidate_patterns == _DEFAULT_LLM_PATTERNS
@@ -378,7 +379,7 @@ def _auto_optimize_cfg(cfg):
 
         if rec_repo is not None and rec_repo != tuned.llm.hf_repo:
             _log_change(
-                f"llm_repo: Ministral-3-14B -> {label}  (RAM {mem_gib:.1f} GiB)"
+                f"llm_repo: Qwen3-8B -> {label}  (RAM {mem_gib:.1f} GiB)"
             )
             llm = replace(tuned.llm, hf_repo=rec_repo, candidate_patterns=rec_pats,
                           ctx_len=rec_ctx)

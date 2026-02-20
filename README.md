@@ -3,7 +3,7 @@
 Deploy **llama.cpp** (`llama-server`) as a private, OpenAI-compatible REST API on an Ubuntu server — with one command, a guided wizard, and named API tokens you can revoke at any time.
 
 ```
-POST /v1/chat/completions   model="unsloth/Ministral-3-14B-Instruct-2512"
+POST /v1/chat/completions   model="Qwen/Qwen3-8B"
 POST /v1/embeddings         model="Qwen/Qwen3-Embedding-0.6B"
 GET  /v1/models
 ```
@@ -46,7 +46,7 @@ Everything is logged to `/var/log/llamacpp_deploy.log`.
 | `sudo` or root access | The script re-executes itself via `sudo` if needed. |
 | Python 3.8+ | Already present on Ubuntu. `tqdm` is installed automatically if missing. |
 | 15–25 GB free disk | Depends on the models you choose (default: ~10 GB total). |
-| 4 GB RAM minimum | 16+ GB recommended for the default Ministral-3-14B model. |
+| 4 GB RAM minimum | 12+ GB recommended for the default Qwen3-8B model. |
 | Internet access | To download the Docker image and GGUF files from HuggingFace. |
 
 ### Optional: GPU
@@ -68,7 +68,7 @@ If you use a private or gated model repository (e.g. Meta-Llama), set the `HF_TO
 export HF_TOKEN=hf_your_token_here
 ```
 
-The default models (Ministral-3-14B-Instruct-2512, Qwen3-Embedding-0.6B) are public and do not require a token.
+The default models (Qwen3-8B, Qwen3-Embedding-0.6B) are public and do not require a token.
 On low-memory hosts, deployment auto-detects RAM/CPU and can downshift to a smaller LLM profile automatically to reduce OOM risk.
 The wizard includes a larger preset catalog (Qwen, Llama, Mistral, Gemma, Phi, BGE) and can prompt you to switch models and retry if a download fails.
 
@@ -226,7 +226,7 @@ Authentication:
 
 Models:
   --llm-repo REPO       HuggingFace repo for the LLM GGUF.
-                        (default: unsloth/Ministral-3-14B-Instruct-2512-GGUF)
+                        (default: Qwen/Qwen3-8B-GGUF)
   --llm-candidates PAT  Comma-separated filename patterns for LLM GGUF.
                         (default: Q4_K_M,Q5_K_M,Q4_0,Q3_K_M)
   --emb-repo REPO       HuggingFace repo for the embedding GGUF.
@@ -248,7 +248,7 @@ HTTPS / TLS (NGINX + Let's Encrypt):
 
 Server tuning:
   --models-max N        Max simultaneously loaded models. (default: 2)
-  --ctx-llm TOKENS      Context window for the LLM. (default: 4096)
+  --ctx-llm TOKENS      Context window for the LLM. (default: 3072)
   --ctx-emb TOKENS      Context window for the embedding model. (default: 2048)
   --parallel N          Router parallel slots. (default: 1)
 ```
@@ -327,7 +327,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "unsloth/Ministral-3-14B-Instruct-2512",
+    "model": "Qwen/Qwen3-8B",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 200
   }'
@@ -356,7 +356,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="unsloth/Ministral-3-14B-Instruct-2512",
+    model="Qwen/Qwen3-8B",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)
@@ -608,7 +608,7 @@ After deployment, `<base-dir>` (default `/opt/llama`) contains:
 ```
 /opt/llama/
 ├── models/
-│   ├── Ministral-3-14B-Instruct-2512-Q4_K_M.gguf
+│   ├── Qwen3-8B-Q4_K_M.gguf
 │   └── Qwen3-Embedding-0.6B-Q8_0.gguf
 ├── presets/
 │   └── models.ini

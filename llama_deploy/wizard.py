@@ -173,7 +173,7 @@ def _step_models() -> Tuple[ModelSpec, ModelSpec]:
     # --- LLM ---
     _section("Text generation model (LLM)")
     llm_presets = [
-        ("Ministral-3-14B-Instruct-2512", "unsloth/Ministral-3-14B-Instruct-2512-GGUF · ~8-9 GB · 4-bit"),
+        ("Qwen3-8B (default)", "Qwen/Qwen3-8B-GGUF · ~5 GB · 4-bit"),
         ("Qwen3-14B",    "Qwen/Qwen3-14B-GGUF · ~9 GB · 4-bit"),
     ]
     llm_presets.extend([
@@ -185,7 +185,7 @@ def _step_models() -> Tuple[ModelSpec, ModelSpec]:
     llm_idx = _choose(llm_presets, default=1, extra_label="Custom HuggingFace repo")
     if llm_idx <= len(llm_presets):
         llm_repos = [
-            ("unsloth/Ministral-3-14B-Instruct-2512-GGUF", ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]),
+            ("Qwen/Qwen3-8B-GGUF", ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]),
             ("Qwen/Qwen3-14B-GGUF", ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]),
         ]
         llm_repos.extend([
@@ -198,12 +198,12 @@ def _step_models() -> Tuple[ModelSpec, ModelSpec]:
     else:
         llm_repo = _prompt("HuggingFace repo (e.g. bartowski/Mistral-7B-GGUF)")
         if not llm_repo:
-            llm_repo = "unsloth/Ministral-3-14B-Instruct-2512-GGUF"
+            llm_repo = "Qwen/Qwen3-8B-GGUF"
             llm_patterns = ["Q4_K_M", "Q5_K_M", "Q4_0", "Q3_K_M"]
         else:
             raw_pats = _prompt("GGUF filename patterns (comma-separated)", "Q4_K_M,Q5_K_M")
             llm_patterns = [p.strip() for p in raw_pats.split(",") if p.strip()]
-    llm_ctx = _prompt_int("Context window (tokens)", default=4096, min_val=128, max_val=131072)
+    llm_ctx = _prompt_int("Context window (tokens)", default=3072, min_val=128, max_val=131072)
 
     # --- Embedding ---
     _section("Embedding model")
