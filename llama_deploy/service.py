@@ -339,7 +339,14 @@ def docker_pull(image: str) -> None:
 
 
 def docker_compose_up(compose_path: Path) -> None:
-    sh(f"cd {quote(str(compose_path.parent))} && docker compose up -d")
+    """Start (or recreate) all services. --force-recreate ensures containers
+    always restart so llama-server re-reads api_keys from disk."""
+    sh(f"cd {quote(str(compose_path.parent))} && docker compose up -d --force-recreate")
+
+
+def docker_compose_restart(compose_path: Path, service: str) -> None:
+    """Restart a single service — faster than full recreate, useful for token sync."""
+    sh(f"cd {quote(str(compose_path.parent))} && docker compose restart {quote(service)}")
 
 
 def docker_compose_down(compose_path: Path) -> None:

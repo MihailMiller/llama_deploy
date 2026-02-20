@@ -386,6 +386,39 @@ def _tokens_revoke(base_dir: Path, token_id: str, auth_mode: AuthMode) -> None:
         print(f"     Create a new token: python -m llama_deploy tokens create --name <name>\n")
 
 
+def _tokens_sync(base_dir: Path, auth_mode: AuthMode) -> None:
+    """
+    Re-sync keyfiles from tokens.json, then restart llama-server (plaintext mode only).
+
+    Plaintext mode:  rewrites api_keys from active tokens, restarts the llama
+                     container so llama-server re-reads the file from disk.
+    Hashed mode:     rewrites token_hashes.json; sidecar picks it up on the next
+                     request — no restart needed.
+    """
+    from llama_deploy.tokens import TokenStore
+    store = TokenStore(base_dir / "secrets", auth_mode=auth_mode)
+    store._sync()
+    active = store.active_tokens()
+
+    if auth_mode == AuthMode.HASHED:
+        hashfile = base_dir / "secrets" / "token_hashes.json"
+        print(f"\nSynced {len(active)} active hash(es) → {hashfile}")
+        print("  Changes take effect immediately (sidecar reloads on every request).\n")
+        return
+
+    keyfile = base_dir / "secrets" / "api_keys"
+    print(f"\nSynced {len(active)} active token(s) → {keyfile}")
+    compose_path = base_dir / "docker-compose.yml"
+    if compose_path.exists():
+        from llama_deploy.service import docker_compose_restart
+        print("  Restarting llama container to reload api_keys...")
+        docker_compose_restart(compose_path, "llama")
+        print("  Done — llama-server is now using the current keyfile.\n")
+    else:
+        print("  (No docker-compose.yml found; restart manually:)")
+        print(f"  docker compose -f {base_dir}/docker-compose.yml restart llama\n")
+
+
 def _tokens_show(base_dir: Path, token_id: str, auth_mode: AuthMode) -> None:
     from llama_deploy.tokens import TokenStore
     store = TokenStore(base_dir / "secrets", auth_mode=auth_mode)
@@ -476,7 +509,8 @@ def _print_top_level_help() -> None:
         "  tokens list         List all API tokens\n"
         "  tokens create       Create a new named API token\n"
         "  tokens revoke <id>  Revoke an API token\n"
-        "  tokens show   <id>  Display a token value (with confirmation)\n\n"
+        "  tokens show   <id>  Display a token value (with confirmation)\n"
+        "  tokens sync         Re-sync keyfiles + restart llama-server (plaintext mode)\n\n"
         "Examples:\n"
         "  python -m llama_deploy\n"
         "  python -m llama_deploy deploy --batch --bind 127.0.0.1 --port 8080\n"
@@ -520,6 +554,10 @@ def _dispatch_tokens(argv: List[str]) -> None:
     p_show = sub.add_parser("show", help="Display a token's value (requires confirmation).")
     p_show.add_argument("id", metavar="TOKEN_ID", help="The tk_... ID to show.")
 
+    sub.add_parser("sync",
+                   help="Re-sync keyfiles from tokens.json and restart llama-server "
+                        "(plaintext mode only; hashed mode takes effect immediately).")
+
     args = parser.parse_args(argv)
     base = Path(args.base_dir)
     auth_mode = AuthMode(args.auth_mode) if args.auth_mode else _detect_auth_mode(base)
@@ -532,3 +570,5 @@ def _dispatch_tokens(argv: List[str]) -> None:
         _tokens_revoke(base, args.id, auth_mode)
     elif args.action == "show":
         _tokens_show(base, args.id, auth_mode)
+    elif args.action == "sync":
+        _tokens_sync(base, auth_mode)
